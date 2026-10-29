@@ -31,9 +31,19 @@
 ```bash
 npm install
 createdb igo            # DATABASE_URL の既定値は postgres://postgres:postgres@localhost:5432/igo
-npm run build -w @igo/shared
-npm run dev             # API: http://localhost:3000 / 画面: http://localhost:5173
+npm run migrate
+npm run dev             # API: http://127.0.0.1:3000 / 画面: http://localhost:5173
 ```
+
+サーバーは既定で 127.0.0.1 だけで待ち受けるので、ほかのPCからは接続できません（Docker イメージでは 0.0.0.0）。
+
+PostgreSQL をインストールしていない場合は、Docker で起動できます。
+
+```bash
+docker run -d --name igo-db -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=igo -p 127.0.0.1:5432:5432 postgres:16
+```
+
+Windows の PowerShell で「スクリプトの実行が無効」と出る場合は、`npm` の代わりに `npm.cmd` を使うか、コマンドプロンプトで実行してください。
 
 テスト（`igo_test` データベースを使います。中身は毎回消去されます）：
 

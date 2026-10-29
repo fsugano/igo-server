@@ -10,7 +10,7 @@ COPY . .
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-slim
-ENV NODE_ENV=production PORT=3000 WEB_DIST=/app/apps/web/dist
+ENV NODE_ENV=production HOST=0.0.0.0 PORT=3000 WEB_DIST=/app/apps/web/dist
 WORKDIR /app
 COPY --from=build /app/node_modules node_modules
 COPY --from=build /app/package.json ./
