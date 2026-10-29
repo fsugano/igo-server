@@ -72,6 +72,9 @@ const ERRORS: Record<string, string> = {
   no_such_seek: 'その募集は締め切られました',
   own_seek: '自分の募集には参加できません',
   invalid_seek: '対局条件が正しくありません',
+  no_such_engine: 'そのAIは使えません',
+  too_many_ai_games: 'AI同士の対局は1人1局までです。終わってから始めてください',
+  server_busy: 'AI同士の対局が混み合っています。しばらくしてからお試しください',
   server_error: 'サーバーエラーが発生しました',
 };
 

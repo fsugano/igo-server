@@ -33,6 +33,16 @@ export const seekSchema = z.object({
   color: z.enum(['black', 'white', 'random']),
 });
 
+/** Conditions for a game against the computer: the seek conditions, with an engine id (or null for the requester) per colour. */
+export const aiGameSchema = seekSchema.omit({ rated: true, color: true }).extend({
+  black: z.string().max(64).nullable(),
+  white: z.string().max(64).nullable(),
+});
+
+/** Handicap limits shared by seeks and computer games. */
+export const validHandicap = (size: number, handicap: number) =>
+  handicap !== 1 && (handicap <= 5 || size === 19);
+
 const MAX_SEEKS_PER_USER = 3;
 
 /** Open game requests and who is online. In memory: move to Redis when running several nodes. */
@@ -67,8 +77,7 @@ export class Lobby {
     const parsed = seekSchema.safeParse(input);
     if (!parsed.success) return 'invalid_seek';
     const req: SeekRequest = parsed.data;
-    if (req.handicap === 1) return 'invalid_seek';
-    if (req.handicap > 0 && req.size !== 19 && req.handicap > 5) return 'invalid_seek';
+    if (!validHandicap(req.size, req.handicap)) return 'invalid_seek';
     const mine = [...this.seeks.values()].filter((s) => s.creator.id === creator.id);
     if (mine.length >= MAX_SEEKS_PER_USER) return 'too_many_seeks';
     const seek: Seek = { ...req, id: randomUUID(), creator, createdAt: Date.now() };

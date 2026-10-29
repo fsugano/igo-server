@@ -20,6 +20,7 @@ import {
   toSgf,
   updateRatings,
 } from '@igo/shared';
+import type { Engine, EngineMove } from './ai/index.js';
 import type { Db } from './db.js';
 import { UserRow, toPublicUser } from './users.js';
 
@@ -38,27 +39,67 @@ export interface LiveGame {
   timer: NodeJS.Timeout | null;
   /** Serialises operations on this game. */
   queue: Promise<unknown>;
+  /** Engine id per colour for computer players. */
+  bots: { black: string | null; white: string | null };
+  /** User who started a game between two engines. Not persisted. */
+  owner: string | null;
+  /** A computer player is thinking about this game. */
+  botBusy: boolean;
+  /** The computer has proposed dead stones in the current scoring phase. */
+  botMarked: boolean;
 }
 
 export interface GameEvents {
   update(g: LiveGame): void;
   finished(g: LiveGame): void;
+  error?(e: unknown): void;
+}
+
+export interface BotOptions {
+  /** Engines by id. */
+  engines?: Map<string, Engine>;
+  /** Minimum time a computer move takes against a person, and between two engines (so people can watch). */
+  moveDelayMs?: number;
+  aiVsAiDelayMs?: number;
 }
 
 export type Result = { ok: true } | { ok: false; error: string };
 
 const MAX_CHAT = 200;
 const colorKey = (c: Stone) => (c === BLACK ? 'black' : 'white');
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** A copy of the game for an engine to read while the real one moves on. */
+function copyGame(src: Game): Game {
+  const g = new Game(src.settings);
+  g.board = src.board;
+  g.toMove = src.toMove;
+  g.koPoint = src.koPoint;
+  g.capturesByBlack = src.capturesByBlack;
+  g.capturesByWhite = src.capturesByWhite;
+  g.moves = src.moves.slice();
+  g.phase = src.phase;
+  return g;
+}
 
 /** Owns all in-progress games: rules, clocks, persistence and rating updates. */
 export class GameService {
   readonly live = new Map<string, LiveGame>();
+  readonly engines: Map<string, Engine>;
+  private moveDelayMs: number;
+  private aiVsAiDelayMs: number;
+  private stopped = false;
 
   constructor(
     private db: Db,
     private events: GameEvents,
     private now: () => number = Date.now,
-  ) {}
+    bots: BotOptions = {},
+  ) {
+    this.engines = bots.engines ?? new Map();
+    this.moveDelayMs = bots.moveDelayMs ?? 400;
+    this.aiVsAiDelayMs = bots.aiVsAiDelayMs ?? 1000;
+  }
 
   /** Restores active games after a restart. The player to move gets a fresh turn start. */
   async loadActive(): Promise<number> {
@@ -70,11 +111,13 @@ export class GameService {
     for (const row of r.rows) {
       const game = Game.fromMoves(row.settings, row.moves);
       const g = this.makeLive(String(row.id), toPublicUser(row.b), toPublicUser(row.w), row.rated, row.clock_settings, game);
+      g.bots = { black: row.b.bot ?? null, white: row.w.bot ?? null };
       g.clocks = row.clocks;
       g.startedAt = new Date(row.started_at).getTime();
       g.turnStartedAt = game.phase === 'playing' ? this.now() : null;
       this.live.set(g.id, g);
       this.schedule(g);
+      this.driveBots(g);
     }
     return r.rows.length;
   }
@@ -85,6 +128,7 @@ export class GameService {
     settings: GameSettings;
     clock: ClockSettings;
     rated: boolean;
+    owner?: string;
   }): Promise<LiveGame> {
     const { black, white, settings, clock, rated } = opts;
     const clocks = { black: initialClock(clock), white: initialClock(clock) };
@@ -94,11 +138,14 @@ export class GameService {
       [black.id, white.id, settings, clock, rated, clocks, black.rating, white.rating],
     );
     const g = this.makeLive(String(r.rows[0].id), toPublicUser(black), toPublicUser(white), rated, clock, new Game(settings));
+    g.bots = { black: black.bot, white: white.bot };
+    g.owner = opts.owner ?? null;
     g.clocks = clocks;
     g.startedAt = new Date(r.rows[0].started_at).getTime();
     g.turnStartedAt = this.now();
     this.live.set(g.id, g);
     this.schedule(g);
+    this.driveBots(g);
     return g;
   }
 
@@ -169,7 +216,10 @@ export class GameService {
   resume(id: string, userId: string): Promise<Result> {
     return this.act(id, userId, true, (g) => {
       const err = g.game.resume();
-      if (!err) g.turnStartedAt = this.now();
+      if (!err) {
+        g.turnStartedAt = this.now();
+        g.botMarked = false;
+      }
       return err;
     });
   }
@@ -185,20 +235,117 @@ export class GameService {
   }
 
   stop() {
+    this.stopped = true;
     for (const g of this.live.values()) if (g.timer) clearTimeout(g.timer);
+    for (const e of this.engines.values()) e.close?.();
   }
 
-  /** Runs fn under the game's lock, then persists and broadcasts if it succeeded. */
+  /** True if both colours are played by engines. */
+  isAiOnly(g: LiveGame): boolean {
+    return !!(g.bots.black && g.bots.white);
+  }
+
+  private engineFor(g: LiveGame, color: Stone): Engine | null {
+    const id = color === BLACK ? g.bots.black : g.bots.white;
+    return id ? (this.engines.get(id) ?? null) : null;
+  }
+
+  /** Lets a computer player act if it is its turn, or accept the score in the scoring phase. */
+  private driveBots(g: LiveGame) {
+    if (this.stopped || g.botBusy || g.game.phase === 'finished') return;
+    if (g.game.phase === 'playing') {
+      const color = g.game.toMove;
+      const engine = this.engineFor(g, color);
+      if (!engine) return;
+      g.botBusy = true;
+      const moveNumber = g.game.moves.length;
+      const minMs = this.isAiOnly(g) ? this.aiVsAiDelayMs : this.moveDelayMs;
+      const started = this.now();
+      void (async () => {
+        let mv: EngineMove;
+        try {
+          mv = await engine.genMove(copyGame(g.game), color);
+        } catch (e) {
+          this.events.error?.(e);
+          mv = { type: 'pass' };
+        }
+        const wait = minMs - (this.now() - started);
+        if (wait > 0) await sleep(wait);
+        await this.botAction(g, color, (gg) => {
+          gg.botBusy = false;
+          if (gg.game.moves.length !== moveNumber || gg.game.phase !== 'playing') return 'stale_move';
+          if (mv.type === 'resign') return gg.game.resign(color);
+          return this.withClock(gg, color, () => {
+            // An illegal move from an external engine becomes a pass.
+            if (mv.type === 'play' && gg.game.play(color, mv.p) === null) return null;
+            return gg.game.pass(color);
+          });
+        });
+      })();
+      return;
+    }
+    // Scoring: propose dead stones once, then accept (again after each change the person makes).
+    const colors = ([BLACK, WHITE] as Stone[]).filter((c) => this.engineFor(g, c) && !g.game.accepted.has(c));
+    if (!colors.length) return;
+    const engine = this.engineFor(g, colors[0])!;
+    g.botBusy = true;
+    void (async () => {
+      let dead: number[] = [];
+      if (!g.botMarked) {
+        try {
+          dead = await engine.deadStones(copyGame(g.game));
+        } catch (e) {
+          this.events.error?.(e);
+        }
+      }
+      await this.botAction(g, colors[0], (gg) => {
+        gg.botBusy = false;
+        if (gg.game.phase !== 'scoring') return 'wrong_phase';
+        if (!gg.botMarked) {
+          gg.botMarked = true;
+          for (const p of dead) if (!gg.game.dead.has(p)) gg.game.toggleDead(p);
+        }
+        for (const c of colors) gg.game.acceptScore(c);
+        return null;
+      });
+    })();
+  }
+
+  /** Applies a computer player's action. fn must clear botBusy; on failure the bot looks again. */
+  private async botAction(g: LiveGame, color: Stone, fn: (g: LiveGame) => string | null) {
+    let r: Result;
+    try {
+      r = await this.run(g.id, () => color, true, fn);
+    } catch (e) {
+      this.events.error?.(e);
+      r = { ok: false, error: 'server_error' };
+    }
+    if (r.ok) return;
+    g.botBusy = false;
+    if (r.error !== 'server_error') this.driveBots(g);
+  }
+
+  /** Runs fn under the game's lock for a user, then persists and broadcasts if it succeeded. */
   private act(
     id: string,
     userId: string,
     playerOnly: boolean,
     fn: (g: LiveGame, color: Stone) => string | null,
   ): Promise<Result> {
+    return this.run(id, (g) => this.colorOf(g, userId), playerOnly, fn);
+  }
+
+  private run(
+    id: string,
+    colorOf: (g: LiveGame) => Stone | null,
+    playerOnly: boolean,
+    fn: (g: LiveGame, color: Stone) => string | null,
+  ): Promise<Result> {
     const g = this.live.get(id);
     if (!g) return Promise.resolve({ ok: false, error: 'no_such_game' });
     const run = async (): Promise<Result> => {
-      const color = this.colorOf(g, userId);
+      if (this.stopped) return { ok: false, error: 'stopped' };
+      const color = colorOf(g);
       if (playerOnly && !color) return { ok: false, error: 'not_a_player' };
       if (g.game.phase === 'finished') return { ok: false, error: 'game_over' };
       const err = fn(g, color!);
@@ -244,7 +391,7 @@ export class GameService {
     if (g.game.phase === 'finished') {
       this.live.delete(g.id);
       this.events.finished(g);
-    }
+    } else this.driveBots(g);
   }
 
   private async finalize(g: LiveGame) {
@@ -339,6 +486,10 @@ export class GameService {
       ratingChange: null,
       timer: null,
       queue: Promise.resolve(),
+      bots: { black: null, white: null },
+      owner: null,
+      botBusy: false,
+      botMarked: false,
     };
   }
 }

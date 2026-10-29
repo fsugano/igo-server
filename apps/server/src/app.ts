@@ -13,10 +13,11 @@ import Fastify, { FastifyReply, FastifyRequest } from 'fastify';
 import { existsSync } from 'node:fs';
 import { Server, Socket } from 'socket.io';
 import { z } from 'zod';
+import { Engine, loadEngines } from './ai/index.js';
 import type { Config } from './config.js';
 import type { Db } from './db.js';
-import { GameService, LiveGame, buildSgf } from './games.js';
-import { Lobby } from './lobby.js';
+import { BotOptions, GameService, LiveGame, buildSgf } from './games.js';
+import { Lobby, aiGameSchema, validHandicap } from './lobby.js';
 import { UserRow, Users, toPublicUser, verifyPassword } from './users.js';
 
 const SESSION_COOKIE = 'sid';
@@ -30,13 +31,29 @@ const loginSchema = z.object({ username: z.string().max(32), password: z.string(
 
 type IoSocket = Socket<ClientToServerEvents, ServerToClientEvents, {}, { user: PublicUser | null }>;
 
-export async function buildApp(config: Config, db: Db) {
+/** Games between two engines use CPU while nobody plays: keep them few. */
+const MAX_AI_ONLY_GAMES = 4;
+const MAX_AI_ONLY_GAMES_PER_USER = 1;
+
+export interface AppOptions extends Omit<BotOptions, 'engines'> {
+  /** Computer players. Default: the built-in levels plus AI_GTP_ENGINES. */
+  engines?: Engine[];
+}
+
+export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
   const app = Fastify({ logger: process.env.NODE_ENV !== 'test', trustProxy: true });
   await app.register(cookie);
   await app.register(rateLimit, { global: false });
 
   const users = new Users(db);
   const lobby = new Lobby();
+
+  const engineList = opts.engines ?? loadEngines();
+  const engines = new Map(engineList.map((e) => [e.id, e]));
+  const botUsers = new Map<string, UserRow>();
+  for (const e of engineList) botUsers.set(e.id, await users.ensureBot(e.username, e.id, ratingForRank(e.rank)));
+  const engineInfo = () =>
+    engineList.map((e) => ({ id: e.id, label: e.label, user: toPublicUser(botUsers.get(e.id)!) }));
   const io = new Server<ClientToServerEvents, ServerToClientEvents, {}, { user: PublicUser | null }>(app.server, {
     serveClient: false,
   });
@@ -74,7 +91,8 @@ export async function buildApp(config: Config, db: Db) {
       }
       broadcastLobby();
     },
-  });
+    error: (e) => app.log.error(e),
+  }, Date.now, { engines, moveDelayMs: opts.moveDelayMs, aiVsAiDelayMs: opts.aiVsAiDelayMs });
   await games.loadActive();
 
   const cookieOpts = {
@@ -313,6 +331,43 @@ export async function buildApp(config: Config, db: Db) {
         if (other.creator.id === creator.id || other.creator.id === accepter.id) lobby.seeks.delete(id);
       }
       io.to(userRoom(g.black.id)).to(userRoom(g.white.id)).emit('game:start', g.id);
+      ack({ ok: true, gameId: g.id });
+      broadcastLobby();
+    }));
+
+    socket.on('ai:engines', safe((ack) => ack({ ok: true, engines: engineInfo() })));
+
+    socket.on('ai:start', safe(async (req, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      const p = aiGameSchema.safeParse(req);
+      if (!p.success || !validHandicap(p.data.size, p.data.handicap)) return ack({ ok: false, error: 'invalid_seek' });
+      const r = p.data;
+      const people = [r.black, r.white].filter((x) => x === null).length;
+      if (people === 2) return ack({ ok: false, error: 'invalid_seek' });
+      for (const id of [r.black, r.white]) if (id !== null && !botUsers.has(id)) return ack({ ok: false, error: 'no_such_engine' });
+      if (people === 1 && userInGame(u.id)) return ack({ ok: false, error: 'already_playing' });
+      if (people === 0) {
+        const aiOnly = [...games.live.values()].filter((g) => games.isAiOnly(g));
+        if (aiOnly.filter((g) => g.owner === u.id).length >= MAX_AI_ONLY_GAMES_PER_USER) {
+          return ack({ ok: false, error: 'too_many_ai_games' });
+        }
+        if (aiOnly.length >= MAX_AI_ONLY_GAMES) return ack({ ok: false, error: 'server_busy' });
+      }
+      const me = await users.byId(u.id);
+      if (!me) return ack({ ok: false, error: 'no_such_user' });
+      const side = (id: string | null) => (id === null ? me : botUsers.get(id)!);
+      const g = await games.create({
+        black: side(r.black),
+        white: side(r.white),
+        settings: { size: r.size, komi: r.komi, handicap: r.handicap, ruleset: r.ruleset },
+        clock: r.clock,
+        rated: false,
+        owner: people === 0 ? u.id : undefined,
+      });
+      if (people === 1) {
+        for (const [id, s] of lobby.seeks) if (s.creator.id === u.id) lobby.seeks.delete(id);
+      }
       ack({ ok: true, gameId: g.id });
       broadcastLobby();
     }));

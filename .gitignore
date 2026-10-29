@@ -4,3 +4,4 @@ dist
 *.log
 coverage
 test-results
+ai-engines.json

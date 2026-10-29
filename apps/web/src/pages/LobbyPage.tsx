@@ -1,9 +1,10 @@
-import type { ClockSettings, LobbyState, Seek, SeekRequest } from '@igo/shared';
+import type { AiEngineInfo, AiGameRequest, ClockSettings, LobbyState, Seek, SeekRequest } from '@igo/shared';
 import { describeClock } from '@igo/shared';
 import { FormEvent, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { errorText } from '../api';
 import { useAuth } from '../auth';
+import { BotBadge } from '../components/BotBadge';
 import { call, getSocket } from '../socket';
 
 const CLOCK_PRESETS: { label: string; clock: ClockSettings }[] = [
@@ -18,6 +19,15 @@ const CLOCK_PRESETS: { label: string; clock: ClockSettings }[] = [
 const sizeLabel = (n: number) => `${n}路`;
 const rulesLabel = (r: string) => (r === 'japanese' ? '日本ルール' : '中国ルール');
 const colorLabel = { black: '黒番', white: '白番', random: 'ニギリ' } as const;
+/** Byo-yomi only: a game between engines then never waits on a long main time. */
+const AI_VS_AI_PRESET = 4;
+
+type Mode = 'human' | 'human-ai' | 'ai-ai';
+const MODES: { mode: Mode; label: string }[] = [
+  { mode: 'human', label: '人対人' },
+  { mode: 'human-ai', label: '人対AI' },
+  { mode: 'ai-ai', label: 'AI対AI' },
+];
 
 export function LobbyPage() {
   const { user } = useAuth();
@@ -108,7 +118,7 @@ export function LobbyPage() {
       </section>
 
       <aside className="side">
-        {user ? <SeekForm onError={setError} /> : (
+        {user ? <NewGame onError={setError} /> : (
           <section className="card">
             <p>
               対局するには<Link to="/login">ログインまたは新規登録</Link>してください。観戦はログインなしでもできます。
@@ -122,8 +132,9 @@ export function LobbyPage() {
               {lobby.games.map((g) => (
                 <li key={g.id}>
                   <Link to={`/game/${g.id}`}>
-                    ● {g.black.username} <span className="rank">{g.black.rank}</span> vs ○ {g.white.username}{' '}
-                    <span className="rank">{g.white.rank}</span>
+                    ● {g.black.username} <span className="rank">{g.black.rank}</span>
+                    <BotBadge user={g.black} /> vs ○ {g.white.username} <span className="rank">{g.white.rank}</span>
+                    <BotBadge user={g.white} />
                   </Link>
                   <small>
                     {sizeLabel(g.size)} · {g.moveCount}手
@@ -147,6 +158,179 @@ export function LobbyPage() {
         </section>
       </aside>
     </div>
+  );
+}
+
+function NewGame({ onError }: { onError: (e: string) => void }) {
+  const [mode, setMode] = useState<Mode>('human');
+  return (
+    <section className="card">
+      <h2>対局を始める</h2>
+      <div className="tabs">
+        {MODES.map((m) => (
+          <button key={m.mode} className={mode === m.mode ? 'active' : ''} onClick={() => setMode(m.mode)}>
+            {m.label}
+          </button>
+        ))}
+      </div>
+      {mode === 'human' ? <SeekForm onError={onError} /> : <AiForm key={mode} mode={mode} onError={onError} />}
+    </section>
+  );
+}
+
+function AiForm({ mode, onError }: { mode: 'human-ai' | 'ai-ai'; onError: (e: string) => void }) {
+  const navigate = useNavigate();
+  const [engines, setEngines] = useState<AiEngineInfo[]>([]);
+  const [size, setSize] = useState<9 | 13 | 19>(9);
+  const [preset, setPreset] = useState(mode === 'ai-ai' ? AI_VS_AI_PRESET : 1);
+  const [handicap, setHandicap] = useState(0);
+  const [komi, setKomi] = useState(6.5);
+  const [ruleset, setRuleset] = useState<'japanese' | 'chinese'>('japanese');
+  const [color, setColor] = useState<SeekRequest['color']>('black');
+  const [engine, setEngine] = useState('');
+  const [whiteEngine, setWhiteEngine] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void call<{ engines: AiEngineInfo[] }>('ai:engines').then((r) => {
+      if (!r.ok) return onError(errorText(r.error));
+      setEngines(r.engines);
+      const first = r.engines[0]?.id ?? '';
+      const second = r.engines[1]?.id ?? first;
+      // Between two engines, default to Lv2: Lv1 is meant for beginners to play against.
+      setEngine(mode === 'ai-ai' ? second : first);
+      setWhiteEngine(second);
+    });
+  }, []);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    onError('');
+    let black: string | null;
+    let white: string | null;
+    if (mode === 'ai-ai') {
+      black = engine;
+      white = whiteEngine;
+    } else {
+      // With handicap stones the person takes black unless they chose white.
+      const meBlack = color === 'black' || (color === 'random' && (handicap > 0 || Math.random() < 0.5));
+      black = meBlack ? null : engine;
+      white = meBlack ? engine : null;
+    }
+    const req: AiGameRequest = {
+      size,
+      komi: handicap ? 0.5 : komi,
+      handicap,
+      ruleset,
+      clock: CLOCK_PRESETS[preset].clock,
+      black,
+      white,
+    };
+    setBusy(true);
+    const r = await call<{ gameId: string }>('ai:start', req);
+    setBusy(false);
+    if (r.ok) navigate(`/game/${r.gameId}`);
+    else onError(errorText(r.error));
+  };
+
+  const engineSelect = (value: string, set: (v: string) => void) => (
+    <select value={value} onChange={(e) => set(e.target.value)}>
+      {engines.map((e) => (
+        <option key={e.id} value={e.id}>
+          {e.label}
+        </option>
+      ))}
+    </select>
+  );
+
+  return (
+    <form className="form" onSubmit={submit}>
+      {mode === 'human-ai' ? (
+        <div className="row">
+          <label>
+            AIの強さ
+            {engineSelect(engine, setEngine)}
+          </label>
+          <label>
+            自分の手番
+            <select value={color} onChange={(e) => setColor(e.target.value as SeekRequest['color'])}>
+              <option value="black">黒</option>
+              <option value="white">白</option>
+              <option value="random">ニギリ</option>
+            </select>
+          </label>
+        </div>
+      ) : (
+        <div className="row">
+          <label>
+            黒番のAI
+            {engineSelect(engine, setEngine)}
+          </label>
+          <label>
+            白番のAI
+            {engineSelect(whiteEngine, setWhiteEngine)}
+          </label>
+        </div>
+      )}
+      <div className="row">
+        <label>
+          碁盤
+          <select value={size} onChange={(e) => setSize(Number(e.target.value) as 9 | 13 | 19)}>
+            <option value={9}>9路</option>
+            <option value={13}>13路</option>
+            <option value={19}>19路</option>
+          </select>
+        </label>
+        <label>
+          ルール
+          <select value={ruleset} onChange={(e) => setRuleset(e.target.value as 'japanese' | 'chinese')}>
+            <option value="japanese">日本ルール</option>
+            <option value="chinese">中国ルール</option>
+          </select>
+        </label>
+      </div>
+      <label>
+        持ち時間
+        <select value={preset} onChange={(e) => setPreset(Number(e.target.value))}>
+          {CLOCK_PRESETS.map((p, i) => (
+            <option key={p.label} value={i}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="row">
+        <label>
+          置き石
+          <select value={handicap} onChange={(e) => setHandicap(Number(e.target.value))}>
+            <option value={0}>互先</option>
+            {[2, 3, 4, 5, 6, 7, 8, 9].filter((h) => size === 19 || h <= 5).map((h) => (
+              <option key={h} value={h}>
+                {h}子
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          コミ
+          <input
+            type="number"
+            step={0.5}
+            value={handicap ? 0.5 : komi}
+            disabled={handicap > 0}
+            onChange={(e) => setKomi(Number(e.target.value))}
+          />
+        </label>
+      </div>
+      <small>
+        {mode === 'human-ai'
+          ? 'AIとの対局はレーティングに影響しません。'
+          : 'AI同士の対局を観戦できます。対局はロビーの「対局中」から誰でも見られます。'}
+      </small>
+      <button className="primary" disabled={busy || !engines.length}>
+        {mode === 'human-ai' ? 'AIと対局する' : '観戦を始める'}
+      </button>
+    </form>
   );
 }
 
@@ -176,73 +360,70 @@ function SeekForm({ onError }: { onError: (e: string) => void }) {
   };
 
   return (
-    <section className="card">
-      <h2>対局を募集する</h2>
-      <form className="form" onSubmit={submit}>
+    <form className="form" onSubmit={submit}>
+      <label>
+        碁盤
+        <select value={size} onChange={(e) => setSize(Number(e.target.value) as 9 | 13 | 19)}>
+          <option value={19}>19路</option>
+          <option value={13}>13路</option>
+          <option value={9}>9路</option>
+        </select>
+      </label>
+      <label>
+        持ち時間
+        <select value={preset} onChange={(e) => setPreset(Number(e.target.value))}>
+          {CLOCK_PRESETS.map((p, i) => (
+            <option key={p.label} value={i}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="row">
         <label>
-          碁盤
-          <select value={size} onChange={(e) => setSize(Number(e.target.value) as 9 | 13 | 19)}>
-            <option value={19}>19路</option>
-            <option value={13}>13路</option>
-            <option value={9}>9路</option>
-          </select>
-        </label>
-        <label>
-          持ち時間
-          <select value={preset} onChange={(e) => setPreset(Number(e.target.value))}>
-            {CLOCK_PRESETS.map((p, i) => (
-              <option key={p.label} value={i}>
-                {p.label}
+          置き石
+          <select value={handicap} onChange={(e) => setHandicap(Number(e.target.value))}>
+            <option value={0}>互先</option>
+            {[2, 3, 4, 5, 6, 7, 8, 9].filter((h) => size === 19 || h <= 5).map((h) => (
+              <option key={h} value={h}>
+                {h}子
               </option>
             ))}
           </select>
         </label>
-        <div className="row">
-          <label>
-            置き石
-            <select value={handicap} onChange={(e) => setHandicap(Number(e.target.value))}>
-              <option value={0}>互先</option>
-              {[2, 3, 4, 5, 6, 7, 8, 9].filter((h) => size === 19 || h <= 5).map((h) => (
-                <option key={h} value={h}>
-                  {h}子
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            コミ
-            <input
-              type="number"
-              step={0.5}
-              value={handicap ? 0.5 : komi}
-              disabled={handicap > 0}
-              onChange={(e) => setKomi(Number(e.target.value))}
-            />
-          </label>
-        </div>
-        <div className="row">
-          <label>
-            ルール
-            <select value={ruleset} onChange={(e) => setRuleset(e.target.value as 'japanese' | 'chinese')}>
-              <option value="japanese">日本ルール</option>
-              <option value="chinese">中国ルール</option>
-            </select>
-          </label>
-          <label>
-            自分の手番
-            <select value={color} onChange={(e) => setColor(e.target.value as SeekRequest['color'])}>
-              <option value="random">ニギリ</option>
-              <option value="black">黒</option>
-              <option value="white">白</option>
-            </select>
-          </label>
-        </div>
-        <label className="check">
-          <input type="checkbox" checked={rated} onChange={(e) => setRated(e.target.checked)} />
-          レーティング対局
+        <label>
+          コミ
+          <input
+            type="number"
+            step={0.5}
+            value={handicap ? 0.5 : komi}
+            disabled={handicap > 0}
+            onChange={(e) => setKomi(Number(e.target.value))}
+          />
         </label>
-        <button className="primary">募集する</button>
-      </form>
-    </section>
+      </div>
+      <div className="row">
+        <label>
+          ルール
+          <select value={ruleset} onChange={(e) => setRuleset(e.target.value as 'japanese' | 'chinese')}>
+            <option value="japanese">日本ルール</option>
+            <option value="chinese">中国ルール</option>
+          </select>
+        </label>
+        <label>
+          自分の手番
+          <select value={color} onChange={(e) => setColor(e.target.value as SeekRequest['color'])}>
+            <option value="random">ニギリ</option>
+            <option value="black">黒</option>
+            <option value="white">白</option>
+          </select>
+        </label>
+      </div>
+      <label className="check">
+        <input type="checkbox" checked={rated} onChange={(e) => setRated(e.target.checked)} />
+        レーティング対局
+      </label>
+      <button className="primary">募集する</button>
+    </form>
   );
 }

@@ -159,3 +159,5 @@ input, select {
   main { padding: 12px 8px; }
   .list { font-size: 13px; }
 }
+
+.badge.ai { background: var(--muted); color: var(--card); font-size: 11px; padding: 1px 6px; margin-left: 4px; }

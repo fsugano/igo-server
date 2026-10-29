@@ -9,6 +9,8 @@ export interface PublicUser {
   rank: string;
   gamesPlayed: number;
   premium: boolean;
+  /** A computer player. */
+  bot: boolean;
 }
 
 export interface SeekRequest {
@@ -26,6 +28,25 @@ export interface Seek extends SeekRequest {
   id: string;
   creator: PublicUser;
   createdAt: number;
+}
+
+/** A computer player that can be picked for a game. */
+export interface AiEngineInfo {
+  id: string;
+  label: string;
+  user: PublicUser;
+}
+
+/** Starts a game against the computer (one side null = the requesting user) or between two engines. */
+export interface AiGameRequest {
+  size: 9 | 13 | 19;
+  komi: number;
+  handicap: number;
+  ruleset: Ruleset;
+  clock: ClockSettings;
+  /** Engine id, or null for the requesting user. */
+  black: string | null;
+  white: string | null;
 }
 
 export interface GameSummary {
@@ -76,6 +97,8 @@ export interface ClientToServerEvents {
   'seek:create': (req: SeekRequest, ack: Ack<{ seek: Seek }>) => void;
   'seek:cancel': (seekId: string, ack: Ack) => void;
   'seek:accept': (seekId: string, ack: Ack<{ gameId: string }>) => void;
+  'ai:engines': (ack: Ack<{ engines: AiEngineInfo[] }>) => void;
+  'ai:start': (req: AiGameRequest, ack: Ack<{ gameId: string }>) => void;
   'game:join': (gameId: string, ack: Ack<{ game: GameView }>) => void;
   'game:leave': (gameId: string) => void;
   'game:move': (gameId: string, point: number, moveNumber: number, ack: Ack) => void;
