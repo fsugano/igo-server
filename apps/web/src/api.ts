@@ -57,6 +57,9 @@ export const api = {
 
 const ERRORS: Record<string, string> = {
   invalid_input: '入力内容を確認してください',
+  invalid_username: 'ユーザー名は半角英数字と _ の3〜16文字で入力してください（スペースや日本語は使えません）',
+  invalid_password: 'パスワードは8文字以上で入力してください',
+  invalid_rank: '棋力を選び直してください',
   username_taken: 'そのユーザー名は使われています',
   bad_credentials: 'ユーザー名かパスワードが違います',
   login_required: 'ログインしてください',

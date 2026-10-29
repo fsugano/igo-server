@@ -22,6 +22,10 @@ export function LoginPage() {
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setError('');
+    if (mode === 'register' && !/^[A-Za-z0-9_]{3,16}$/.test(username)) {
+      setError(errorText('invalid_username'));
+      return;
+    }
     setBusy(true);
     try {
       const r = mode === 'login' ? await api.login(username, password) : await api.register(username, password, rank);

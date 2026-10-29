@@ -100,7 +100,12 @@ export async function buildApp(config: Config, db: Db) {
 
   app.post('/api/auth/register', authLimit, async (req, reply) => {
     const p = registerSchema.safeParse(req.body);
-    if (!p.success) return reply.code(400).send({ error: 'invalid_input' });
+    if (!p.success) {
+      // Report the first bad field so the form can say what to fix.
+      const field = p.error.issues[0]?.path[0];
+      const error = field === 'username' || field === 'password' || field === 'rank' ? `invalid_${field}` : 'invalid_input';
+      return reply.code(400).send({ error });
+    }
     const u = await users.create(p.data.username, p.data.password, ratingForRank(p.data.rank));
     if (u === 'taken') return reply.code(409).send({ error: 'username_taken' });
     await startSession(reply, u);

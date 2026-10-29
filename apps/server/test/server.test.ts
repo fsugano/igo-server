@@ -81,6 +81,13 @@ describe('auth', () => {
       body: JSON.stringify({ username: 'ALICE', password: 'password123', rank: '1k' }),
     });
     expect(dup.status).toBe(409);
+    const spaced = await fetch(`${base}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'Matcha Dainagon', password: 'password123', rank: '6d' }),
+    });
+    expect(spaced.status).toBe(400);
+    expect((await spaced.json()).error).toBe('invalid_username');
     const bad = await fetch(`${base}/api/auth/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

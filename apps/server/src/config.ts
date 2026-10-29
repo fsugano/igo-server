@@ -11,7 +11,7 @@ export interface Config {
 export function loadConfig(env = process.env): Config {
   return {
     port: Number(env.PORT ?? 3000),
-    host: env.HOST ?? '0.0.0.0',
+    host: env.HOST ?? '127.0.0.1',
     databaseUrl: env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/igo',
     webDist: env.WEB_DIST ?? null,
     secureCookies: env.NODE_ENV === 'production',
