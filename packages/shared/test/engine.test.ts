@@ -123,6 +123,14 @@ describe('game', () => {
     expect(g.toMove).toBe(WHITE);
   });
 
+  it('replays a record that resumed from the scoring phase', () => {
+    const g = new Game(S9);
+    g.play(BLACK, 40); g.pass(WHITE); g.pass(BLACK); g.resume(); g.play(WHITE, 41);
+    const r = Game.fromMoves(S9, g.moves);
+    expect(r.phase).toBe('playing');
+    expect(r.board.cells).toEqual(g.board.cells);
+  });
+
   it('resign and timeout set results', () => {
     const g = new Game(S9);
     g.resign(BLACK);

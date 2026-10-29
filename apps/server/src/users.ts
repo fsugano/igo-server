@@ -12,6 +12,8 @@ export interface UserRow {
   rating: number;
   games_played: number;
   plan: string;
+  /** Engine id for computer players, null for people. */
+  bot: string | null;
 }
 
 export function toPublicUser(u: UserRow): PublicUser {
@@ -22,6 +24,7 @@ export function toPublicUser(u: UserRow): PublicUser {
     rank: rankLabel(u.rating),
     gamesPlayed: u.games_played,
     premium: u.plan === 'premium',
+    bot: !!u.bot,
   };
 }
 
@@ -52,6 +55,17 @@ export class Users {
       [username, hash, rating],
     );
     return r.rows[0] ?? 'taken';
+  }
+
+  /** Creates or updates the account a computer player plays under. Its password hash matches nothing. */
+  async ensureBot(username: string, engineId: string, rating: number): Promise<UserRow> {
+    const r = await this.db.query<UserRow>(
+      `INSERT INTO users (username, password_hash, rating, bot) VALUES ($1, '!', $2, $3)
+       ON CONFLICT (lower(username)) DO UPDATE SET bot = EXCLUDED.bot, rating = EXCLUDED.rating, password_hash = '!'
+       RETURNING *`,
+      [username, rating, engineId],
+    );
+    return r.rows[0];
   }
 
   async byName(username: string): Promise<UserRow | null> {

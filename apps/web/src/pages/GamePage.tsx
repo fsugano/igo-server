@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom';
 import { GameRecord, api, errorText } from '../api';
 import { useAuth } from '../auth';
 import { Board, pointName } from '../components/Board';
+import { BotBadge } from '../components/BotBadge';
 import { Clock } from '../components/Clock';
 import { call, getSocket } from '../socket';
 
@@ -111,6 +112,7 @@ function LiveGame({ initial }: { initial: GameView }) {
   const myTurn = me !== null && st.phase === 'playing' && st.toMove === me;
   const elapsed = view.turnStartedAt === null ? 0 : now - offset - view.turnStartedAt;
   const last = st.moves[st.moves.length - 1];
+  const toMoveUser = st.toMove === BLACK ? view.black : view.white;
 
   const act = async (ev: Parameters<typeof call>[0], ...args: unknown[]) => {
     setError('');
@@ -127,10 +129,12 @@ function LiveGame({ initial }: { initial: GameView }) {
     st.phase === 'finished'
       ? resultText(st.result)
       : st.phase === 'scoring'
-        ? '整地中：死に石をクリックして指定し、双方が「合意」すると終局します'
+        ? me && (view.black.bot || view.white.bot)
+          ? '整地中：AIが死に石を指定しました。違っていればクリックで直して「合意」してください'
+          : '整地中：死に石をクリックして指定し、双方が「合意」すると終局します'
         : myTurn
           ? 'あなたの番です'
-          : `${st.toMove === BLACK ? '黒' : '白'}番`;
+          : `${st.toMove === BLACK ? '黒' : '白'}番${toMoveUser.bot ? '（AI思考中…）' : ''}`;
 
   return (
     <div className="game">
@@ -229,7 +233,11 @@ function PlayerRow(props: {
     <div className={`player${toMove ? ' to-move' : ''}`}>
       <span className={`dot ${color === BLACK ? 'black' : 'white'}`} />
       <div className="who">
-        <Link to={`/u/${user.username}`}>{user.username}</Link> <span className="rank">{user.rank}</span>
+        <span>
+          <Link to={`/u/${user.username}`}>{user.username}</Link>
+          <BotBadge user={user} />
+        </span>{' '}
+        <span className="rank">{user.rank}</span>
         {ratingChange !== undefined && ratingChange !== null && (
           <span className={ratingChange >= 0 ? 'up' : 'down'}>
             {' '}

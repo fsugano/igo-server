@@ -61,6 +61,8 @@ export class Game {
   static fromMoves(settings: GameSettings, moves: Move[]): Game {
     const g = new Game(settings);
     for (const m of moves) {
+      // A move after two passes means the players resumed from the scoring phase.
+      if (g.phase === 'scoring') g.resume();
       const err = m.p === PASS ? g.pass(m.c) : g.play(m.c, m.p);
       if (err) throw new Error(`invalid move record at ${g.moves.length}: ${err}`);
     }

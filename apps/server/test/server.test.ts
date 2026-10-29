@@ -1,7 +1,10 @@
 import type { AddressInfo } from 'node:net';
-import type { ClientToServerEvents, GameView, ServerToClientEvents, SeekRequest } from '@igo/shared';
+import { Game, PASS, Stone } from '@igo/shared';
+import type { AiGameRequest, ClientToServerEvents, GameView, ServerToClientEvents, SeekRequest } from '@igo/shared';
 import { io as ioClient, Socket } from 'socket.io-client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { BUILTIN_LEVELS, BuiltinEngine } from '../src/ai/builtin.js';
+import type { Engine, EngineMove } from '../src/ai/index.js';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import { createDb, migrate } from '../src/db.js';
@@ -14,10 +17,29 @@ let base = '';
 let close: () => Promise<void>;
 const sockets: Client[] = [];
 
+/** Predictable computer player: plays the first legal point from the top-left, passes after a pass. */
+const stub: Engine = {
+  id: 'stub',
+  username: 'AI-Stub',
+  label: 'Stub',
+  rank: '30k',
+  async genMove(game: Game, color: Stone): Promise<EngineMove> {
+    if (game.moves.at(-1)?.p === PASS) return { type: 'pass' };
+    for (let p = 0; p < game.board.cells.length; p++) {
+      if (typeof game.board.play(p, color, game.koPoint) !== 'string') return { type: 'play', p };
+    }
+    return { type: 'pass' };
+  },
+  async deadStones() {
+    return [];
+  },
+};
+
 beforeAll(async () => {
   await db.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
   await migrate(db);
-  const { app } = await buildApp({ ...loadConfig({}), databaseUrl: url }, db);
+  const engines = [new BuiltinEngine(BUILTIN_LEVELS[0], 1), stub];
+  const { app } = await buildApp({ ...loadConfig({}), databaseUrl: url }, db, { engines, moveDelayMs: 0, aiVsAiDelayMs: 0 });
   await app.listen({ port: 0, host: '127.0.0.1' });
   base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   close = async () => {
@@ -186,4 +208,77 @@ describe('play', () => {
     expect((await fin).state.result).toBe('W+R');
     expect((await emit(sb, 'seek:create', seek)).ok).toBe(true);
   });
+});
+
+const ai: AiGameRequest = {
+  size: 9,
+  komi: 6.5,
+  handicap: 0,
+  ruleset: 'japanese',
+  clock: { type: 'byoyomi', mainTime: 600_000, periods: 3, periodTime: 30_000 },
+  black: null,
+  white: 'stub',
+};
+
+describe('computer players', () => {
+  // Registration is rate limited, so the tests below share one account.
+  let h: { cookie: string };
+  it('lists the engines with their bot accounts', async () => {
+    const s = await connect();
+    const r = await emit(s, 'ai:engines');
+    expect(r.engines.map((e: any) => e.user.username)).toEqual(['AI-Lv1', 'AI-Stub']);
+    expect(r.engines[0].user.bot).toBe(true);
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'AI-Stub', password: '!' }),
+    });
+    expect(login.status).toBe(401);
+  });
+
+  it('plays a person against the computer through to an agreed score', async () => {
+    h = await register('human1');
+    const s = await connect(h.cookie);
+    expect((await emit(s, 'ai:start', { ...ai, black: null, white: null })).error).toBe('invalid_seek');
+    expect((await emit(s, 'ai:start', { ...ai, white: 'nope' })).error).toBe('no_such_engine');
+    const r = await emit(s, 'ai:start', ai);
+    expect(r.ok).toBe(true);
+    const joined = await emit(s, 'game:join', r.gameId);
+    expect(joined.game.white.bot).toBe(true);
+    expect(joined.game.rated).toBe(false);
+    expect((await emit(s, 'seek:create', seek)).error).toBe('already_playing');
+
+    // Black plays the right edge; the stub answers from the top-left each time.
+    const replied = nextUpdate(s, (g) => g.state.moves.length === 2);
+    expect((await emit(s, 'game:move', r.gameId, 8, 0)).ok).toBe(true);
+    expect((await replied).state.moves[1]).toEqual({ c: 2, p: 0 });
+
+    // A pass is answered with a pass; the computer then accepts the score, and so do we.
+    const scoring = nextUpdate(s, (g) => g.state.phase === 'scoring' && g.state.accepted.length === 1);
+    expect((await emit(s, 'game:pass', r.gameId, 2)).ok).toBe(true);
+    expect((await scoring).state.accepted).toEqual([2]);
+    const done = nextUpdate(s, (g) => g.state.phase === 'finished');
+    expect((await emit(s, 'game:acceptScore', r.gameId)).ok).toBe(true);
+    const fin = await done;
+    expect(fin.state.result).toBe('W+6.5');
+    expect(fin.ratingChange).toBeNull();
+  });
+
+  it('runs a game between two engines that anyone can watch', async () => {
+    const s = await connect(h.cookie);
+    const r = await emit(s, 'ai:start', { ...ai, black: 'builtin-1', white: 'builtin-1' });
+    expect(r.ok).toBe(true);
+    expect((await emit(s, 'ai:start', { ...ai, black: 'stub', white: 'builtin-1' })).error).toBe('too_many_ai_games');
+    // Watching an engine game does not stop the owner from playing.
+    expect((await emit(s, 'seek:create', seek)).ok).toBe(true);
+    const viewer = await connect();
+    const done = nextUpdate(viewer, (g) => g.state.phase === 'finished');
+    expect((await emit(viewer, 'game:join', r.gameId)).ok).toBe(true);
+    const fin = await done;
+    expect(fin.state.moves.length).toBeGreaterThan(20);
+    expect(fin.state.result).toMatch(/^[BW]\+/);
+    const rec = await (await fetch(`${base}/api/games/${r.gameId}`)).json();
+    expect(rec.status).toBe('finished');
+    expect(Game.fromMoves(rec.settings, rec.moves).moves.length).toBe(fin.state.moves.length);
+  }, 30_000);
 });
