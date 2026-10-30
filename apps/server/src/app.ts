@@ -3,20 +3,23 @@ import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
 import {
   Ack,
+  BLACK,
   ClientToServerEvents,
   GameSettings,
   PublicUser,
   ServerToClientEvents,
+  WHITE,
   ratingForRank,
 } from '@igo/shared';
 import Fastify, { FastifyReply, FastifyRequest } from 'fastify';
 import { existsSync } from 'node:fs';
 import { Server, Socket } from 'socket.io';
 import { z } from 'zod';
+import { CannedChat, ChatContext, ChatResponder, LINES, chatResponder } from './ai/chat.js';
 import { Engine, loadEngines } from './ai/index.js';
 import type { Config } from './config.js';
 import type { Db } from './db.js';
-import { BotOptions, GameService, LiveGame, buildSgf } from './games.js';
+import { BotOptions, GameService, LiveGame, buildSgf, copyGame } from './games.js';
 import { Lobby, aiGameSchema, validHandicap } from './lobby.js';
 import { UserRow, Users, toPublicUser, verifyPassword } from './users.js';
 
@@ -38,6 +41,8 @@ const MAX_AI_ONLY_GAMES_PER_USER = 1;
 export interface AppOptions extends Omit<BotOptions, 'engines'> {
   /** Computer players. Default: the built-in levels plus AI_GTP_ENGINES. */
   engines?: Engine[];
+  /** What computer players say in the chat. Default: Claude when ANTHROPIC_API_KEY is set, set phrases otherwise. */
+  chat?: ChatResponder;
 }
 
 export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
@@ -52,6 +57,12 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
   const engines = new Map(engineList.map((e) => [e.id, e]));
   const botUsers = new Map<string, UserRow>();
   for (const e of engineList) botUsers.set(e.id, await users.ensureBot(e.username, e.id, ratingForRank(e.rank)));
+  const chat = opts.chat ?? chatResponder();
+  const canned = new CannedChat();
+  const maxChat = Number(process.env.AI_CHAT_MAX_PER_GAME ?? 30);
+  const chatCounts = new Map<string, number>();
+  const chatBusy = new Set<string>();
+  app.log.info(`AI chat: ${chat.kind === 'claude' ? 'Claude API' : 'set phrases (no ANTHROPIC_API_KEY)'}`);
   const engineInfo = () =>
     engineList.map((e) => ({ id: e.id, label: e.label, user: toPublicUser(botUsers.get(e.id)!) }));
   const io = new Server<ClientToServerEvents, ServerToClientEvents, {}, { user: PublicUser | null }>(app.server, {
@@ -85,6 +96,9 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
   const games: GameService = new GameService(db, {
     update: (g) => io.to(gameRoom(g.id)).emit('game:update', games.view(g, spectators(g.id))),
     finished: async (g) => {
+      const bot = g.black.bot ? g.black : g.white;
+      if (bot.bot && !games.isAiOnly(g)) botSay(g.id, bot, LINES.thanks);
+      chatCounts.delete(g.id);
       for (const id of [g.black.id, g.white.id]) {
         const u = await users.byId(id);
         if (u) lobby.updateUser(toPublicUser(u));
@@ -367,6 +381,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       });
       if (people === 1) {
         for (const [id, s] of lobby.seeks) if (s.creator.id === u.id) lobby.seeks.delete(id);
+        botSay(g.id, r.black ? g.black : g.white, LINES.greeting);
       }
       ack({ ok: true, gameId: g.id });
       broadcastLobby();
@@ -405,12 +420,53 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       if (!msg) return ack({ ok: false, error: 'invalid_chat' });
       io.to(gameRoom(String(gameId))).emit('game:chat', String(gameId), msg);
       ack({ ok: true });
+      const g = games.live.get(String(gameId));
+      if (g) void answerChat(g, u);
     }));
 
     socket.on('disconnect', () => {
       if (me && lobby.disconnect(me.id)) broadcastLobby();
     });
   });
+
+  /** Posts a computer player's chat line. Works after the game has ended, when it is no longer live. */
+  function botSay(gameId: string, bot: PublicUser, text: string) {
+    const msg = games.chat(gameId, bot, text) ?? { user: bot.username, text, at: Date.now() };
+    io.to(gameRoom(gameId)).emit('game:chat', gameId, msg);
+  }
+
+  /** Lets the computer answer its opponent's chat, one reply at a time and at most AI_CHAT_MAX_PER_GAME per game. */
+  async function answerChat(g: LiveGame, speaker: PublicUser) {
+    const color = games.colorOf(g, speaker.id);
+    if (!color) return;
+    const botColor = color === BLACK ? WHITE : BLACK;
+    const bot = botColor === BLACK ? g.black : g.white;
+    if (!bot.bot || chatBusy.has(g.id)) return;
+    const n = chatCounts.get(g.id) ?? 0;
+    if (n > maxChat) return;
+    chatCounts.set(g.id, n + 1);
+    if (n === maxChat) return botSay(g.id, bot, LINES.tired);
+    chatBusy.add(g.id);
+    try {
+      const ctx: ChatContext = {
+        game: copyGame(g.game),
+        botColor,
+        botName: bot.username,
+        opponentName: speaker.username,
+        history: g.chat.slice(-20),
+      };
+      let text: string | null;
+      try {
+        text = await chat.reply(ctx);
+      } catch (e) {
+        app.log.error(e);
+        text = await canned.reply(ctx);
+      }
+      if (text) botSay(g.id, bot, text);
+    } finally {
+      chatBusy.delete(g.id);
+    }
+  }
 
   function userInGame(userId: string): LiveGame | undefined {
     for (const g of games.live.values()) if (g.black.id === userId || g.white.id === userId) return g;

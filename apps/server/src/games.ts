@@ -70,7 +70,7 @@ const colorKey = (c: Stone) => (c === BLACK ? 'black' : 'white');
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** A copy of the game for an engine to read while the real one moves on. */
-function copyGame(src: Game): Game {
+export function copyGame(src: Game): Game {
   const g = new Game(src.settings);
   g.board = src.board;
   g.toMove = src.toMove;
