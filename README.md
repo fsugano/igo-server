@@ -24,6 +24,23 @@
 - 二連続パスのあとは AI が死に石を指定して合意します。人が死に石を直すと、AI はそのまま合意し直します。
 - 対局中にサーバーを再起動しても、AI の手番から続きを打ちます。
 
+### AIとのチャット
+
+人対AIの対局では、チャット欄でAIに話しかけられます。AIは対局の始めに挨拶し、終局後にお礼を言います。
+
+- **APIキーなし**：決まった台詞で返事をします。費用はかかりません
+- **APIキーあり**：Claude（Anthropic の言語AI）が盤面と形勢を見ながら会話します。話しかけた言語で返事をします。リポジトリ直下に `.env` を作り、キーを書いてからサーバーを起動してください（`.env` は Git に含まれません）
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+# 任意：使うモデル（既定は claude-opus-5-5。claude-haiku-5-5 にするとかなり安くなります）
+AI_CHAT_MODEL=claude-haiku-5-5
+# 任意：1局あたりのAIの返事の上限（既定 30）
+AI_CHAT_MAX_PER_GAME=30
+```
+
+APIキーは [Claude Console](https://console.anthropic.com/) で作れます。利用料は前払いのクレジットから使った分だけ差し引かれます。Claude.ai の有料プランとは別です。サーバー起動時のログに `AI chat: Claude API` と出ていれば、キーが読み込まれています。
+
 ### KataGo など外部エンジンをつなぐ
 
 GTP（Go Text Protocol）に対応したエンジンなら、設定を JSON で書くだけで AI の選択肢に加わります。例：KataGo を Windows で使う場合、`ai-engines.json` を作って
@@ -41,11 +58,10 @@ GTP（Go Text Protocol）に対応したエンジンなら、設定を JSON で�
 ]
 ```
 
-環境変数 `AI_GTP_ENGINES` にそのファイルの場所（または JSON そのもの）を入れてから起動します。
+`.env` に `AI_GTP_ENGINES` としてそのファイルの場所（または JSON そのもの）を書いてから起動します。
 
-```bat
-set AI_GTP_ENGINES=C:\Users\PC\Desktop\ai-site\igo-server\ai-engines.json
-npm run dev
+```
+AI_GTP_ENGINES=C:/Users/PC/Desktop/ai-site/igo-server/ai-engines.json
 ```
 
 - `name` は英数字と `_`（アカウント名は `AI-KataGo` になります）、`rank` は表示用の棋力（`9d`、`5k` など）
