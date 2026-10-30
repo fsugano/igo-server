@@ -281,4 +281,18 @@ describe('computer players', () => {
     expect(rec.status).toBe('finished');
     expect(Game.fromMoves(rec.settings, rec.moves).moves.length).toBe(fin.state.moves.length);
   }, 30_000);
+
+  it('greets, answers chat and thanks its opponent', async () => {
+    const s = await connect(h.cookie);
+    const r = await emit(s, 'ai:start', { ...ai, black: 'stub', white: null });
+    expect(r.ok).toBe(true);
+    const joined = await emit(s, 'game:join', r.gameId);
+    expect(joined.game.chat.map((m: any) => [m.user, m.text])).toEqual([['AI-Stub', 'よろしくお願いします。']]);
+    const answer = new Promise<any>((res) => s.on('game:chat', (_id, m) => m.user === 'AI-Stub' && res(m)));
+    expect((await emit(s, 'game:chat', r.gameId, 'ありがとう')).ok).toBe(true);
+    expect((await answer).text).toBe('こちらこそ。');
+    const thanks = new Promise<any>((res) => s.on('game:chat', (_id, m) => m.text === 'ありがとうございました。' && res(m)));
+    expect((await emit(s, 'game:resign', r.gameId)).ok).toBe(true);
+    expect((await thanks).user).toBe('AI-Stub');
+  });
 });

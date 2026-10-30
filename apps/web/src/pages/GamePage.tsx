@@ -218,7 +218,12 @@ function LiveGame({ initial }: { initial: GameView }) {
           </a>
           {st.phase === 'finished' && <Link className="button" to="/">ロビーへ</Link>}
         </div>
-        <Chat gameId={view.id} messages={chat} canPost={!!user} />
+        <Chat
+          gameId={view.id}
+          messages={chat}
+          canPost={!!user}
+          placeholder={me && (me === BLACK ? view.white : view.black).bot ? 'AIに話しかける' : 'メッセージ'}
+        />
       </aside>
     </div>
   );
@@ -256,7 +261,8 @@ function PlayerRow(props: {
   );
 }
 
-function Chat({ gameId, messages, canPost }: { gameId: string; messages: ChatMessage[]; canPost: boolean }) {
+function Chat(props: { gameId: string; messages: ChatMessage[]; canPost: boolean; placeholder: string }) {
+  const { gameId, messages, canPost, placeholder } = props;
   const [text, setText] = useState('');
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -280,7 +286,7 @@ function Chat({ gameId, messages, canPost }: { gameId: string; messages: ChatMes
       </div>
       {canPost && (
         <form onSubmit={send}>
-          <input value={text} onChange={(e) => setText(e.target.value)} maxLength={300} placeholder="メッセージ" />
+          <input value={text} onChange={(e) => setText(e.target.value)} maxLength={300} placeholder={placeholder} />
         </form>
       )}
     </div>
