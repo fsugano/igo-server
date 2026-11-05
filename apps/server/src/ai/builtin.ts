@@ -276,6 +276,8 @@ export interface Analysis {
   best: number;
   /** Win rate of the best move for the side to move. */
   winrate: number;
+  /** Win rate over all playouts for the side to move: steadier than `winrate`, a little pessimistic. */
+  meanWinrate: number;
   /** Mean ownership per point over all playouts: +1 black, -1 white. */
   ownership: Float64Array;
   playouts: number;
@@ -390,7 +392,14 @@ export async function analyze(game: Game, color: Stone, opts: SearchOptions): Pr
   for (let i = 0; i < cands.length; i++) if (bi < 0 || visits[i] > visits[bi]) bi = i;
   const best = bi < 0 ? -1 : cands[bi];
   const winrate = bi < 0 || !visits[bi] ? 0 : wins[bi] / visits[bi];
-  return { best, winrate, ownership, playouts: total };
+  let allVisits = 0;
+  let allWins = 0;
+  for (let i = 0; i < cands.length; i++) {
+    allVisits += visits[i];
+    allWins += wins[i];
+  }
+  const meanWinrate = allVisits ? allWins / allVisits : winrate;
+  return { best, winrate, meanWinrate, ownership, playouts: total };
 }
 
 /** Black's margin estimated from mean ownership (area counting, komi included). */

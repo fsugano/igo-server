@@ -1,3 +1,4 @@
+import type { GaugeState } from './broadcast.js';
 import type { ClockSettings, PlayerClock } from './clock.js';
 import type { GameSnapshot } from './game.js';
 import type { Ruleset } from './scoring.js';
@@ -108,6 +109,9 @@ export interface ClientToServerEvents {
   'game:acceptScore': (gameId: string, ack: Ack) => void;
   'game:resume': (gameId: string, ack: Ack) => void;
   'game:chat': (gameId: string, text: string, ack: Ack) => void;
+  /** Spectators only: receive the evaluation gauge of a live game (refused for its players). */
+  'gauge:watch': (gameId: string, ack: Ack<{ gauge: GaugeState }>) => void;
+  'gauge:unwatch': (gameId: string) => void;
 }
 
 export interface ServerToClientEvents {
@@ -115,4 +119,5 @@ export interface ServerToClientEvents {
   'game:start': (gameId: string) => void;
   'game:update': (game: GameView) => void;
   'game:chat': (gameId: string, msg: ChatMessage) => void;
+  'gauge:update': (gauge: GaugeState) => void;
 }

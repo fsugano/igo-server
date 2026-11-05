@@ -1,4 +1,4 @@
-import type { ClockSettings, GameSettings, Move, PublicUser } from '@igo/shared';
+import type { AppSettings, ClockSettings, GameSettings, Move, PublicUser, RECORDING_METHODS, RecordingMethod, Role } from '@igo/shared';
 
 export class ApiError extends Error {}
 
@@ -40,8 +40,28 @@ export interface GameRecord {
   startedAt: number;
 }
 
+/** Private to the signed-in user. */
+export interface Account {
+  role: Role;
+  allowRecording: boolean;
+}
+
+export interface AdminSettings {
+  settings: AppSettings;
+  recordingMethods: typeof RECORDING_METHODS;
+}
+
 export const api = {
-  me: () => request<{ user: PublicUser | null }>('/api/me'),
+  me: () => request<{ user: PublicUser | null; account: Account | null }>('/api/me'),
+  setAllowRecording: (allowRecording: boolean) =>
+    request<{ account: Account }>('/api/me/settings', { method: 'PATCH', body: JSON.stringify({ allowRecording }) }),
+  adminSettings: () => request<AdminSettings>('/api/admin/settings'),
+  saveAdminSettings: (patch: Partial<AppSettings>) =>
+    request<AdminSettings>('/api/admin/settings', { method: 'PATCH', body: JSON.stringify(patch) }),
+  broadcastInfo: (id: string) =>
+    request<{ recordingMethod: RecordingMethod; consent: { black: boolean; white: boolean } }>(
+      `/api/admin/broadcast/${encodeURIComponent(id)}`,
+    ),
   login: (username: string, password: string) =>
     request<{ user: PublicUser }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
   register: (username: string, password: string, rank: string) =>
@@ -76,6 +96,10 @@ const ERRORS: Record<string, string> = {
   too_many_ai_games: 'AI同士の対局は1人1局までです。終わってから始めてください',
   server_busy: 'AI同士の対局が混み合っています。しばらくしてからお試しください',
   server_error: 'サーバーエラーが発生しました',
+  forbidden: 'この操作をする権限がありません',
+  invalid_settings: '設定の値が正しくありません',
+  players_cannot_watch_gauge: '対局者は対局中に形勢ゲージを見られません',
+  no_such_game: 'その対局は終わったか、見つかりません',
 };
 
 export const errorText = (code: string) => ERRORS[code] ?? code;

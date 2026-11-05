@@ -6,6 +6,7 @@ import { useAuth } from '../auth';
 import { Board, pointName } from '../components/Board';
 import { BotBadge } from '../components/BotBadge';
 import { Clock } from '../components/Clock';
+import { Gauge, useGauge } from '../components/Gauge';
 import { call, getSocket } from '../socket';
 
 export function resultText(r: string | null): string {
@@ -21,7 +22,7 @@ export function resultText(r: string | null): string {
 }
 
 let audio: AudioContext | null = null;
-function clickSound() {
+export function clickSound() {
   try {
     audio ??= new AudioContext();
     const t = audio.currentTime;
@@ -113,6 +114,8 @@ function LiveGame({ initial }: { initial: GameView }) {
   const elapsed = view.turnStartedAt === null ? 0 : now - offset - view.turnStartedAt;
   const last = st.moves[st.moves.length - 1];
   const toMoveUser = st.toMove === BLACK ? view.black : view.white;
+  // Spectators see the evaluation gauge; players never do (the server refuses them too).
+  const { gauge, error: gaugeError } = useGauge(view.id, me === null && st.phase !== 'finished');
 
   const act = async (ev: Parameters<typeof call>[0], ...args: unknown[]) => {
     setError('');
@@ -150,6 +153,7 @@ function LiveGame({ initial }: { initial: GameView }) {
         />
       </div>
       <aside className="panel">
+        {me === null && st.phase !== 'finished' && !gaugeError && <Gauge gauge={gauge} />}
         <PlayerRow
           color={WHITE}
           user={view.white}

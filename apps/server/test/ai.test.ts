@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { BUILTIN_LEVELS, BuiltinEngine, FastBoard, analyze, rng } from '../src/ai/builtin.js';
+import { BuiltinEvaluator } from '../src/ai/gauge.js';
 import { GtpEngine, fromVertex, toVertex } from '../src/ai/gtp.js';
 import { loadEngines } from '../src/ai/index.js';
 
@@ -46,6 +47,22 @@ describe('FastBoard', () => {
         expect(Array.from(fb.cells)).toEqual(Array.from(g.board.cells));
         expect(fb.ko).toBe(g.koPoint);
       }
+    }
+  });
+});
+
+describe('built-in evaluator', () => {
+  // Black walls off almost all of the board; white has a small corner.
+  const rows = ['....X.O..', '....X.OO.', '....X....', '....X....', '....X....', '....X....', '....X....', '....X....', '....X....'];
+  const blackWide = rows;
+  const whiteWide = rows.map((r) => [...r].map((c) => (c === 'X' ? 'O' : c === 'O' ? 'X' : c)).join(''));
+
+  it("reports black's chances whoever is to move", async () => {
+    const ev = new BuiltinEvaluator({ playouts: 1500, maxMs: 5000 });
+    for (const toMove of [BLACK, WHITE] as const) {
+      // A wall on the fifth column gives its owner the larger left side.
+      expect(await ev.evaluate(position(blackWide, toMove))).toBeGreaterThan(0.6);
+      expect(await ev.evaluate(position(whiteWide, toMove))).toBeLessThan(0.4);
     }
   });
 });
