@@ -1,4 +1,5 @@
 export * from './board.js';
+export * from './broadcast.js';
 export * from './clock.js';
 export * from './game.js';
 export * from './protocol.js';

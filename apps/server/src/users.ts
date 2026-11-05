@@ -1,6 +1,6 @@
 import { createHash, randomBytes, scrypt as scryptCb, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
-import { PublicUser, rankLabel } from '@igo/shared';
+import { PublicUser, Role, rankLabel } from '@igo/shared';
 import type { Db } from './db.js';
 
 const scrypt = promisify(scryptCb) as (pw: string, salt: Buffer, len: number) => Promise<Buffer>;
@@ -14,6 +14,9 @@ export interface UserRow {
   plan: string;
   /** Engine id for computer players, null for people. */
   bot: string | null;
+  role: Role;
+  /** Consents to appearing by name in videos the operators publish. */
+  allow_recording: boolean;
 }
 
 export function toPublicUser(u: UserRow): PublicUser {
@@ -95,6 +98,18 @@ export class Users {
       [hashToken(token)],
     );
     return r.rows[0] ?? null;
+  }
+
+  async setRole(username: string, role: Role): Promise<UserRow | null> {
+    const r = await this.db.query<UserRow>('UPDATE users SET role = $2 WHERE lower(username) = lower($1) AND bot IS NULL RETURNING *', [
+      username,
+      role,
+    ]);
+    return r.rows[0] ?? null;
+  }
+
+  async setAllowRecording(id: string, allow: boolean): Promise<void> {
+    await this.db.query('UPDATE users SET allow_recording = $2 WHERE id = $1', [id, allow]);
   }
 
   async deleteSession(token: string): Promise<void> {

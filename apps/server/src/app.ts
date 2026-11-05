@@ -4,8 +4,12 @@ import fastifyStatic from '@fastify/static';
 import {
   Ack,
   ClientToServerEvents,
+  Game,
   GameSettings,
+  GaugeState,
   PublicUser,
+  RECORDING_METHODS,
+  Role,
   ServerToClientEvents,
   ratingForRank,
 } from '@igo/shared';
@@ -13,11 +17,13 @@ import Fastify, { FastifyReply, FastifyRequest } from 'fastify';
 import { existsSync } from 'node:fs';
 import { Server, Socket } from 'socket.io';
 import { z } from 'zod';
+import { BuiltinEvaluator, Evaluator, GaugeService } from './ai/gauge.js';
 import { Engine, loadEngines } from './ai/index.js';
 import type { Config } from './config.js';
 import type { Db } from './db.js';
-import { BotOptions, GameService, LiveGame, buildSgf } from './games.js';
+import { BotOptions, GameService, LiveGame, buildSgf, copyGame } from './games.js';
 import { Lobby, aiGameSchema, validHandicap } from './lobby.js';
+import { Settings } from './settings.js';
 import { UserRow, Users, toPublicUser, verifyPassword } from './users.js';
 
 const SESSION_COOKIE = 'sid';
@@ -28,6 +34,7 @@ const registerSchema = z.object({
   rank: z.string().regex(/^([1-9]|[12][0-9]|30)k$|^[1-9]d$/i),
 });
 const loginSchema = z.object({ username: z.string().max(32), password: z.string().max(200) });
+const accountSettingsSchema = z.object({ allowRecording: z.boolean() }).strict();
 
 type IoSocket = Socket<ClientToServerEvents, ServerToClientEvents, {}, { user: PublicUser | null }>;
 
@@ -38,6 +45,8 @@ const MAX_AI_ONLY_GAMES_PER_USER = 1;
 export interface AppOptions extends Omit<BotOptions, 'engines'> {
   /** Computer players. Default: the built-in levels plus AI_GTP_ENGINES. */
   engines?: Engine[];
+  /** Judges positions for the spectators' gauge. Default: the built-in search. */
+  evaluator?: Evaluator;
 }
 
 export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
@@ -47,6 +56,8 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
 
   const users = new Users(db);
   const lobby = new Lobby();
+  const settings = new Settings(db);
+  await settings.load();
 
   const engineList = opts.engines ?? loadEngines();
   const engines = new Map(engineList.map((e) => [e.id, e]));
@@ -71,6 +82,32 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     return n;
   };
 
+  // ---- Evaluation gauge ----
+  // Players never receive it; spectators see it a few moves late in games a person plays in.
+  const gaugeRoom = (id: string) => `gauge:${id}`;
+  const gaugeWatchers = (id: string) => io.sockets.adapter.rooms.get(gaugeRoom(id))?.size ?? 0;
+  const gaugeDelay = (g: LiveGame) => (games.isAiOnly(g) ? 0 : settings.get().liveDelayMoves);
+  const gaugeState = (g: LiveGame, final = false): GaugeState => {
+    const delay = final ? 0 : gaugeDelay(g);
+    return { gameId: g.id, delay, evals: gauge.visible(g.id, g.game.moves.length, delay), engine: gauge.evaluator.id, final };
+  };
+  const emitGauge = (g: LiveGame, final = false) => io.to(gaugeRoom(g.id)).emit('gauge:update', gaugeState(g, final));
+  const gauge = new GaugeService(
+    opts.evaluator ?? new BuiltinEvaluator(),
+    (gameId) => {
+      const g = games.live.get(gameId);
+      if (g) emitGauge(g);
+    },
+    (e) => app.log.error(e),
+  );
+  /** Queues the positions a spectator needs: the one they may see now, and the current one for later. */
+  const requestGauge = (g: LiveGame) => {
+    const n = g.game.moves.length;
+    const shown = Math.max(0, n - gaugeDelay(g));
+    if (shown < n) gauge.request(g.id, shown, Game.fromMoves(g.game.settings, g.game.moves.slice(0, shown)));
+    if (g.game.phase === 'playing') gauge.request(g.id, n, copyGame(g.game));
+  };
+
   let lobbyDirty = false;
   const broadcastLobby = () => {
     if (lobbyDirty) return;
@@ -83,8 +120,17 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
   const lobbyState = () => lobby.state([...games.live.values()].map((g) => games.summary(g)));
 
   const games: GameService = new GameService(db, {
-    update: (g) => io.to(gameRoom(g.id)).emit('game:update', games.view(g, spectators(g.id))),
+    update: (g) => {
+      io.to(gameRoom(g.id)).emit('game:update', games.view(g, spectators(g.id)));
+      if (gaugeWatchers(g.id) && g.game.phase !== 'finished') {
+        emitGauge(g);
+        requestGauge(g);
+      }
+    },
     finished: async (g) => {
+      // Once the game is over nothing is hidden any more.
+      if (gaugeWatchers(g.id)) emitGauge(g, true);
+      gauge.forget(g.id);
       for (const id of [g.black.id, g.white.id]) {
         const u = await users.byId(id);
         if (u) lobby.updateUser(toPublicUser(u));
@@ -105,6 +151,20 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
 
   async function currentUser(req: FastifyRequest): Promise<UserRow | null> {
     return users.bySession(req.cookies[SESSION_COOKIE]);
+  }
+
+  /** Replies 401/403 and returns null unless the requester has one of the roles. */
+  async function requireRole(req: FastifyRequest, reply: FastifyReply, roles: Role[]): Promise<UserRow | null> {
+    const u = await currentUser(req);
+    if (!u) {
+      reply.code(401).send({ error: 'login_required' });
+      return null;
+    }
+    if (!roles.includes(u.role)) {
+      reply.code(403).send({ error: 'forbidden' });
+      return null;
+    }
+    return u;
   }
 
   async function startSession(reply: FastifyReply, user: UserRow) {
@@ -150,7 +210,47 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
 
   app.get('/api/me', async (req) => {
     const u = await currentUser(req);
-    return { user: u ? toPublicUser(u) : null };
+    return { user: u ? toPublicUser(u) : null, account: u ? { role: u.role, allowRecording: u.allow_recording } : null };
+  });
+
+  app.patch('/api/me/settings', async (req, reply) => {
+    const u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    const p = accountSettingsSchema.safeParse(req.body);
+    if (!p.success) return reply.code(400).send({ error: 'invalid_input' });
+    await users.setAllowRecording(u.id, p.data.allowRecording);
+    return { account: { role: u.role, allowRecording: p.data.allowRecording } };
+  });
+
+  // ---- Operators ----
+
+  app.get('/api/admin/settings', async (req, reply) => {
+    if (!(await requireRole(req, reply, ['staff', 'admin']))) return;
+    return { settings: settings.get(), recordingMethods: RECORDING_METHODS };
+  });
+
+  app.patch('/api/admin/settings', async (req, reply) => {
+    const u = await requireRole(req, reply, ['admin']);
+    if (!u) return;
+    const next = await settings.update(req.body, u.id);
+    if (!next) return reply.code(400).send({ error: 'invalid_settings' });
+    app.log.info({ by: u.username, settings: next }, 'settings changed');
+    // Spectators see the new delay straight away.
+    for (const g of games.live.values()) if (gaugeWatchers(g.id)) emitGauge(g);
+    return { settings: next, recordingMethods: RECORDING_METHODS };
+  });
+
+  /** What the recording mode needs besides the game itself: the method, and who agreed to be shown by name. */
+  app.get<{ Params: { id: string } }>('/api/admin/broadcast/:id', async (req, reply) => {
+    if (!(await requireRole(req, reply, ['staff', 'admin']))) return;
+    const g = games.live.get(req.params.id);
+    if (!g) return reply.code(404).send({ error: 'not_found' });
+    const consent = async (id: string) => {
+      const u = await users.byId(id);
+      return !!u && (!!u.bot || u.allow_recording);
+    };
+    const [black, white] = await Promise.all([consent(g.black.id), consent(g.white.id)]);
+    return { recordingMethod: settings.get().recordingMethod, consent: { black, white } };
   });
 
   app.get<{ Params: { username: string } }>('/api/users/:username', async (req, reply) => {
@@ -380,6 +480,17 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     }));
     socket.on('game:leave', (gameId) => void socket.leave(gameRoom(String(gameId))));
 
+    socket.on('gauge:watch', safe(async (gameId, ack) => {
+      const g = games.live.get(String(gameId));
+      if (!g) return ack({ ok: false, error: 'no_such_game' });
+      // Seeing the evaluation while playing would be playing with an assistant.
+      if (me && (me.id === g.black.id || me.id === g.white.id)) return ack({ ok: false, error: 'players_cannot_watch_gauge' });
+      await socket.join(gaugeRoom(g.id));
+      requestGauge(g);
+      ack({ ok: true, gauge: gaugeState(g) });
+    }));
+    socket.on('gauge:unwatch', (gameId) => void socket.leave(gaugeRoom(String(gameId))));
+
     const gameAction =
       <A extends unknown[]>(fn: (u: PublicUser, gameId: string, ...rest: A) => Promise<{ ok: true } | { ok: false; error: string }>) =>
       safe(async (gameId: string, ...rest: [...A, Ack]) => {
@@ -418,9 +529,10 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
   }
 
   app.addHook('onClose', async () => {
+    gauge.stop();
     games.stop();
     io.close();
   });
 
-  return { app, io, games, lobby };
+  return { app, io, games, lobby, settings };
 }
