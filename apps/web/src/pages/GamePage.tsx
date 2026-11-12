@@ -7,6 +7,7 @@ import { Board, pointName } from '../components/Board';
 import { BotBadge } from '../components/BotBadge';
 import { Clock } from '../components/Clock';
 import { Gauge, useGauge } from '../components/Gauge';
+import { NarrationChoice, NarrationSelect, loadNarrationChoice, saveNarrationChoice, useNarration } from '../components/Narration';
 import { call, getSocket } from '../socket';
 
 export function resultText(r: string | null): string {
@@ -116,6 +117,15 @@ function LiveGame({ initial }: { initial: GameView }) {
   const toMoveUser = st.toMove === BLACK ? view.black : view.white;
   // Spectators see the evaluation gauge; players never do (the server refuses them too).
   const { gauge, error: gaugeError } = useGauge(view.id, me === null && st.phase !== 'finished');
+  // Spoken commentary is for spectators too: to a player it would be a second pair of eyes on the board.
+  const [narration, setNarration] = useState<NarrationChoice>(loadNarrationChoice);
+  const spectating = me === null;
+  useNarration({
+    view,
+    names: spectating ? { black: view.black.username, white: view.white.username } : null,
+    gauge: spectating ? gauge : null,
+    lang: spectating ? narration : 'off',
+  });
 
   const act = async (ev: Parameters<typeof call>[0], ...args: unknown[]) => {
     setError('');
@@ -154,6 +164,15 @@ function LiveGame({ initial }: { initial: GameView }) {
       </div>
       <aside className="panel">
         {me === null && st.phase !== 'finished' && !gaugeError && <Gauge gauge={gauge} />}
+        {spectating && st.phase !== 'finished' && (
+          <NarrationSelect
+            value={narration}
+            onChange={(v) => {
+              setNarration(v);
+              saveNarrationChoice(v);
+            }}
+          />
+        )}
         <PlayerRow
           color={WHITE}
           user={view.white}

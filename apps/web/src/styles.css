@@ -166,6 +166,8 @@ input, select {
 /* ---- Evaluation gauge (original design: a tug-of-war bar) ---- */
 .gauge { --gauge-h: 18px; --gauge-black: #16130f; --gauge-white: #f6f1e6; --gauge-trail: #e0a13a; display: flex; flex-direction: column; gap: 4px; }
 .gauge.large { --gauge-h: 46px; gap: 10px; }
+.narration-select { display: flex; gap: 8px; align-items: center; font-size: 13px; }
+.panel .narration-select { color: var(--muted); }
 .gauge-bar {
   position: relative;
   height: var(--gauge-h);
@@ -310,3 +312,31 @@ input, select {
 @keyframes intro-right { from { transform: translateX(700px); opacity: 0; } to { transform: none; opacity: 1; } }
 @keyframes intro-pop { from { transform: scale(1.8); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 @keyframes intro-out { 0%, 80% { opacity: 1; } 100% { opacity: 0; visibility: hidden; } }
+
+/* ---- Profile: record and playing style ---- */
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 12px 0 20px; }
+@media (max-width: 760px) { .stats { grid-template-columns: 1fr; } }
+.stats-block { border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.stats-block h3 { margin: 0; }
+.stat-tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.stat-tiles .tile { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; }
+.stat-tiles .label, .stat-tiles .sub { font-size: 12px; color: var(--muted); }
+.stat-tiles .value { font-size: 20px; font-weight: 700; }
+.recent-form { display: flex; gap: 4px; align-items: center; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+.recent-form .form { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 4px; font-size: 12px; color: #fff; }
+.recent-form .form.W { background: #2f7d4f; }
+.recent-form .form.L { background: #a8443a; }
+.recent-form .form.D { background: #8a8378; }
+.list.compact td, .list.compact th { padding: 4px 8px; }
+.rating-graph { margin: 0; }
+.rating-graph figcaption { font-size: 12px; color: var(--muted); }
+.rating-graph svg { width: 100%; height: 120px; display: block; }
+.rating-graph polyline { fill: none; stroke: currentColor; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.style-name { font-size: 22px; font-weight: 700; margin: 0; }
+.style-name small { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 6px; }
+.style-axes { display: flex; flex-direction: column; gap: 8px; }
+.style-axes .axis { display: grid; grid-template-columns: 5.5em 1fr 5.5em; gap: 8px; align-items: center; font-size: 12px; }
+.style-axes .axis .end:last-child { text-align: right; }
+.style-axes .bar { position: relative; height: 8px; border-radius: 4px; background: var(--line); }
+.style-axes .mark { position: absolute; top: 50%; width: 14px; height: 14px; border-radius: 50%; background: currentColor; transform: translate(-50%, -50%); }
+.traits { margin: 0; padding-left: 1.2em; }

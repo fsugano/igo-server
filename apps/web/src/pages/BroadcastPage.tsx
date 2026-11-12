@@ -6,6 +6,7 @@ import { useAuth } from '../auth';
 import { Board, pointName } from '../components/Board';
 import { Clock } from '../components/Clock';
 import { Gauge, GaugeGraph, useGauge } from '../components/Gauge';
+import { NarrationChoice, NarrationSelect, useNarration } from '../components/Narration';
 import { Recording, canCrop, saveVideo, startTabRecording, tabRecordingUnsupported } from '../recorder';
 import { call, getSocket } from '../socket';
 import { clickSound, resultText } from './GamePage';
@@ -27,6 +28,8 @@ function Broadcast({ id }: { id: string }) {
   const height = params.get('h') === '720' ? 720 : 1080;
   const fps = params.get('fps') === '30' ? 30 : 60;
   const showGauge = params.get('gauge') !== '0';
+  const narr = params.get('narr');
+  const narration: NarrationChoice = narr === 'ja' || narr === 'en' ? narr : 'off';
   const setParam = (k: string, v: string) => {
     const next = new URLSearchParams(params);
     next.set(k, v);
@@ -40,6 +43,11 @@ function Broadcast({ id }: { id: string }) {
   const [now, setNow] = useState(Date.now());
   const prevMoves = useRef<number | null>(null);
   const { gauge, error: gaugeError } = useGauge(id, showGauge);
+  // Players who have not agreed to appear by name are only called Black and White.
+  const narrationNames = view && info
+    ? { black: info.consent.black ? view.black.username : '', white: info.consent.white ? view.white.username : '' }
+    : null;
+  const { intro: sayIntro } = useNarration({ view, names: narrationNames, gauge: showGauge ? gauge : null, lang: narration });
 
   useEffect(() => {
     const s = getSocket();
@@ -123,6 +131,7 @@ function Broadcast({ id }: { id: string }) {
       setRec(r);
       setRecStart(Date.now());
       setIntro((n) => n + 1);
+      sayIntro();
     } catch (e) {
       setRecError(e instanceof Error && e.name === 'NotAllowedError' ? '画面の共有が許可されませんでした' : String(e));
     }
@@ -169,6 +178,7 @@ function Broadcast({ id }: { id: string }) {
           <input type="checkbox" checked={showGauge} onChange={(e) => setParam('gauge', e.target.checked ? '1' : '0')} />
           形勢ゲージ
         </label>
+        <NarrationSelect value={narration} onChange={(v) => setParam('narr', v)} />
         {rec ? (
           <>
             <button className="danger" onClick={() => void stop()}>

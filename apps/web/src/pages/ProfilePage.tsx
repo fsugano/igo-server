@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ProfileGame, api, errorText } from '../api';
 import { useAuth } from '../auth';
+import { PlayerStats } from '../components/PlayerStats';
 import { resultText } from './GamePage';
 import type { PublicUser } from '@igo/shared';
 
@@ -35,6 +36,8 @@ export function ProfilePage() {
         レーティング {user.rating} · レート対局 {user.gamesPlayed}局 · 直近{finished.length}局で{wins}勝
       </p>
       {mine && <RecordingConsent />}
+      <PlayerStats username={user.username} />
+      <h3>対局履歴</h3>
       <table className="list">
         <thead>
           <tr>

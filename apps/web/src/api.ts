@@ -1,4 +1,4 @@
-import type { AppSettings, ClockSettings, GameSettings, Move, PublicUser, RECORDING_METHODS, RecordingMethod, Role } from '@igo/shared';
+import type { AppSettings, ClockSettings, GameSettings, Move, PlayStyle, PlayerRecord, PublicUser, RECORDING_METHODS, RecordingMethod, Role } from '@igo/shared';
 
 export class ApiError extends Error {}
 
@@ -73,6 +73,8 @@ export const api = {
   profile: (username: string) =>
     request<{ user: PublicUser; games: ProfileGame[] }>(`/api/users/${encodeURIComponent(username)}`),
   game: (id: string) => request<GameRecord>(`/api/games/${encodeURIComponent(id)}`),
+  stats: (username: string) =>
+    request<{ games: number; limit: number; record: PlayerRecord; style: PlayStyle }>(`/api/users/${encodeURIComponent(username)}/stats`),
 };
 
 const ERRORS: Record<string, string> = {
