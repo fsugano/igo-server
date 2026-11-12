@@ -12,7 +12,10 @@ import {
   RECORDING_METHODS,
   Role,
   ServerToClientEvents,
+  StatsGame,
   WHITE,
+  judgeStyle,
+  playerRecord,
   ratingForRank,
 } from '@igo/shared';
 import Fastify, { FastifyReply, FastifyRequest } from 'fastify';
@@ -30,6 +33,8 @@ import { Settings } from './settings.js';
 import { UserRow, Users, toPublicUser, verifyPassword } from './users.js';
 
 const SESSION_COOKIE = 'sid';
+/** Finished games the record and style are computed from (the latest ones). */
+const STATS_GAMES = 300;
 
 const registerSchema = z.object({
   username: z.string().regex(/^[A-Za-z0-9_]{3,16}$/),
@@ -265,6 +270,37 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     };
     const [black, white] = await Promise.all([consent(g.black.id), consent(g.white.id)]);
     return { recordingMethod: settings.get().recordingMethod, consent: { black, white } };
+  });
+
+  /** Record and playing style from the latest finished games. */
+  app.get<{ Params: { username: string } }>('/api/users/:username/stats', async (req, reply) => {
+    const u = await users.byName(req.params.username);
+    if (!u) return reply.code(404).send({ error: 'not_found' });
+    const r = await db.query(
+      `SELECT g.id, g.black_id, g.settings, g.rated, g.result, g.started_at, g.moves, g.rating_change,
+              g.black_rating, g.white_rating, b.username AS black, w.username AS white, b.bot AS black_bot, w.bot AS white_bot
+       FROM games g JOIN users b ON b.id = g.black_id JOIN users w ON w.id = g.white_id
+       WHERE (g.black_id = $1 OR g.white_id = $1) AND g.status = 'finished' AND g.result IS NOT NULL
+       ORDER BY g.started_at DESC LIMIT $2`,
+      [u.id, STATS_GAMES],
+    );
+    const games: StatsGame[] = r.rows.map((g) => {
+      const black = String(g.black_id) === String(u.id);
+      return {
+        id: String(g.id),
+        color: black ? BLACK : WHITE,
+        opponent: black ? g.white : g.black,
+        vsBot: !!(black ? g.white_bot : g.black_bot),
+        rated: g.rated,
+        settings: g.settings,
+        result: g.result,
+        startedAt: new Date(g.started_at).getTime(),
+        moves: g.moves,
+        ratingBefore: black ? g.black_rating : g.white_rating,
+        ratingChange: g.rating_change ? (black ? g.rating_change.black : g.rating_change.white) : null,
+      };
+    });
+    return { games: games.length, limit: STATS_GAMES, record: playerRecord(games), style: judgeStyle(games) };
   });
 
   app.get<{ Params: { username: string } }>('/api/users/:username', async (req, reply) => {

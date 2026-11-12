@@ -172,6 +172,13 @@ describe('play', () => {
     const profile = await (await fetch(`${base}/api/users/white1`)).json();
     expect(profile.user.gamesPlayed).toBe(1);
     expect(profile.games[0].result).toBe('W+6.5');
+    const stats = await (await fetch(`${base}/api/users/white1/stats`)).json();
+    expect(stats.games).toBe(1);
+    expect(stats.record.total).toEqual({ games: 1, wins: 1, losses: 0, draws: 0 });
+    expect(stats.record.asWhite.wins).toBe(1);
+    expect(stats.record.ratingHistory).toHaveLength(1);
+    expect(stats.style.ready).toBe(false);
+    expect((await fetch(`${base}/api/users/nobody_here/stats`)).status).toBe(404);
     const rec = await (await fetch(`${base}/api/games/${gameId}`)).json();
     expect(rec.moves).toHaveLength(12);
   });
