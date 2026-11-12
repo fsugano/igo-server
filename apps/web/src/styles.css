@@ -166,6 +166,8 @@ input, select {
 /* ---- Evaluation gauge (original design: a tug-of-war bar) ---- */
 .gauge { --gauge-h: 18px; --gauge-black: #16130f; --gauge-white: #f6f1e6; --gauge-trail: #e0a13a; display: flex; flex-direction: column; gap: 4px; }
 .gauge.large { --gauge-h: 46px; gap: 10px; }
+.narration-select { display: flex; gap: 8px; align-items: center; font-size: 13px; }
+.panel .narration-select { color: var(--muted); }
 .gauge-bar {
   position: relative;
   height: var(--gauge-h);
