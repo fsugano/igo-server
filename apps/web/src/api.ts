@@ -85,6 +85,8 @@ const ERRORS: Record<string, string> = {
   username_taken: 'そのユーザー名は使われています',
   bad_credentials: 'ユーザー名かパスワードが違います',
   login_required: 'ログインしてください',
+  rate_limited: '操作が速すぎます。少し待ってからもう一度お試しください',
+  not_in_game: 'この対局を開いている人だけがチャットできます',
   occupied: 'そこには打てません',
   suicide: '自殺手は打てません',
   ko: 'コウです。他の場所に打ってからにしてください',

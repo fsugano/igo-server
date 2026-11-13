@@ -303,3 +303,45 @@ describe('computer players', () => {
     expect((await thanks).user).toBe('AI-Stub');
   });
 });
+
+describe('protection', () => {
+  it('refuses the realtime connection from another site', async () => {
+    const s: Client = ioClient(base, { extraHeaders: { origin: 'https://evil.example' }, transports: ['websocket'] });
+    sockets.push(s);
+    const err = await new Promise<Error>((r) => s.on('connect_error', r));
+    expect(err).toBeTruthy();
+    expect(s.connected).toBe(false);
+  });
+
+  it('lets only people who opened the game write in its chat, and limits how fast', async () => {
+    // An account from the earlier tests (sign-ups are limited per address): the game opened in one tab, the chat sent from another.
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'white1', password: 'password123' }),
+    });
+    expect(login.status).toBe(200);
+    const owner = { cookie: login.headers.get('set-cookie')!.split(';')[0] };
+    const so = await connect(owner.cookie);
+    const r = await emit(so, 'ai:start', { ...ai, black: 'stub', white: null });
+    expect(r.ok).toBe(true);
+    const sx = await connect(owner.cookie);
+    expect((await emit(sx, 'game:chat', r.gameId, 'hi')).error).toBe('not_in_game');
+    expect((await emit(sx, 'game:join', r.gameId)).ok).toBe(true);
+    const results = [];
+    for (let i = 0; i < 4; i++) results.push((await emit(sx, 'game:chat', r.gameId, `m${i}`)).error ?? 'ok');
+    // 'not_in_game' above counted too: 3 per 5 seconds.
+    expect(results).toEqual(['ok', 'ok', 'rate_limited', 'rate_limited']);
+    await emit(so, 'game:resign', r.gameId);
+  });
+
+  it('answers a login for an unknown name like a wrong password', async () => {
+    const res = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'no_such_user', password: 'password123' }),
+    });
+    expect(res.status).toBe(401);
+    expect((await res.json()).error).toBe('bad_credentials');
+  });
+});

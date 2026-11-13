@@ -158,7 +158,10 @@ npm test
 docker compose up --build   # http://localhost:3000
 ```
 
-単体のコンテナとして Fly.io、Render、Google Cloud Run、AWS ECS などに載せられます。環境変数は `DATABASE_URL`、`PORT`、`NODE_ENV=production`（HTTPS 必須。Cookie が Secure になります）です。
+単体のコンテナとして Fly.io、Render、Google Cloud Run、AWS ECS などに載せられます。環境変数は `DATABASE_URL`（本番では必須）、`PORT`、`NODE_ENV=production`（HTTPS 必須。Cookie が Secure になります）です。
+
+- `TRUST_PROXY`：リバースプロキシやロードバランサーの後ろで動かすときに設定します。Fly.io・Render・Cloud Run のようにプロキシが1段なら `1`、プロキシの IP が決まっていればその IP（CIDR 可、カンマ区切り）。**未設定ならどのプロキシも信用しません**（`X-Forwarded-For` を偽装して、ログイン・登録の回数制限をすり抜けられないようにするため）
+- `ALLOWED_ORIGINS`：Web 画面を API と別のドメインで配信するときに、そのドメインを書きます（例：`https://igo.example.com`）。未設定なら、同じサイトからのリアルタイム接続だけを受け付けます
 
 ## 今後の計画
 

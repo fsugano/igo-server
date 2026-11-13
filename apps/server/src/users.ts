@@ -45,6 +45,10 @@ export async function verifyPassword(pw: string, stored: string): Promise<boolea
   return timingSafeEqual(key, got);
 }
 
+let dummy: Promise<string> | null = null;
+/** A hash of a random password, compared against when a login names no existing user. */
+export const dummyHash = () => (dummy ??= hashPassword(randomBytes(16).toString('hex')));
+
 const hashToken = (t: string) => createHash('sha256').update(t).digest('hex');
 
 export class Users {

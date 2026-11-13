@@ -30,7 +30,8 @@ import type { Db } from './db.js';
 import { BotOptions, GameService, LiveGame, buildSgf, copyGame } from './games.js';
 import { Lobby, aiGameSchema, validHandicap } from './lobby.js';
 import { Settings } from './settings.js';
-import { UserRow, Users, toPublicUser, verifyPassword } from './users.js';
+import { EventLimiter, originAllowed } from './socket-guard.js';
+import { UserRow, Users, dummyHash, toPublicUser, verifyPassword } from './users.js';
 
 const SESSION_COOKIE = 'sid';
 /** Finished games the record and style are computed from (the latest ones). */
@@ -60,7 +61,11 @@ export interface AppOptions extends Omit<BotOptions, 'engines'> {
 }
 
 export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
-  const app = Fastify({ logger: process.env.NODE_ENV !== 'test', trustProxy: true });
+  const app = Fastify({
+    logger: process.env.NODE_ENV !== 'test',
+    // Fastify accepts a hop count too, though its types leave it out.
+    trustProxy: config.trustProxy as boolean | string,
+  });
   await app.register(cookie);
   await app.register(rateLimit, { global: false });
 
@@ -83,7 +88,9 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     engineList.map((e) => ({ id: e.id, label: e.label, user: toPublicUser(botUsers.get(e.id)!) }));
   const io = new Server<ClientToServerEvents, ServerToClientEvents, {}, { user: PublicUser | null }>(app.server, {
     serveClient: false,
+    allowRequest: (req, cb) => cb(null, originAllowed(req, config.allowedOrigins, config.secureCookies)),
   });
+  const limiter = new EventLimiter();
 
   const gameRoom = (id: string) => `game:${id}`;
   const userRoom = (id: string) => `user:${id}`;
@@ -213,7 +220,9 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     const p = loginSchema.safeParse(req.body);
     if (!p.success) return reply.code(400).send({ error: 'invalid_input' });
     const u = await users.byName(p.data.username);
-    if (!u || !(await verifyPassword(p.data.password, u.password_hash))) {
+    // Check a password even for unknown names, so the response time does not tell which names exist.
+    const ok = await verifyPassword(p.data.password, u?.password_hash ?? (await dummyHash()));
+    if (!u || !ok) {
       return reply.code(401).send({ error: 'bad_credentials' });
     }
     await startSession(reply, u);
@@ -413,6 +422,13 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
 
   io.on('connection', (socket: IoSocket) => {
     const me = socket.data.user;
+    // Limits count per account when logged in, so several tabs or connections share them.
+    const limitKey = me ? `u${me.id}` : `s${socket.id}`;
+    socket.use(([event, ...args], next) => {
+      if (limiter.allow(limitKey, String(event))) return next();
+      const ack = args[args.length - 1];
+      if (typeof ack === 'function') ack({ ok: false, error: 'rate_limited' });
+    });
     if (me) {
       lobby.connect(me);
       socket.join(userRoom(me.id));
@@ -563,6 +579,8 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     socket.on('game:chat', safe((gameId, text, ack) => {
       const u = needUser(ack);
       if (!u) return;
+      // Only people who have the game open (players and spectators) may write in its chat.
+      if (!socket.rooms.has(gameRoom(String(gameId)))) return ack({ ok: false, error: 'not_in_game' });
       const msg = games.chat(String(gameId), u, String(text));
       if (!msg) return ack({ ok: false, error: 'invalid_chat' });
       io.to(gameRoom(String(gameId))).emit('game:chat', String(gameId), msg);
@@ -572,6 +590,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     }));
 
     socket.on('disconnect', () => {
+      if (!me) limiter.forget(limitKey);
       if (me && lobby.disconnect(me.id)) broadcastLobby();
     });
   });
