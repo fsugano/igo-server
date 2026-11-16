@@ -1,4 +1,8 @@
+import { mkdtempSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import sharp from 'sharp';
 import { Game, PASS, Stone } from '@igo/shared';
 import type { AiGameRequest, ClientToServerEvents, GameView, ServerToClientEvents, SeekRequest } from '@igo/shared';
 import { io as ioClient, Socket } from 'socket.io-client';
@@ -39,7 +43,7 @@ beforeAll(async () => {
   await db.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
   await migrate(db);
   const engines = [new BuiltinEngine(BUILTIN_LEVELS[0], 1), stub];
-  const { app } = await buildApp({ ...loadConfig({}), databaseUrl: url }, db, { engines, moveDelayMs: 0, aiVsAiDelayMs: 0 });
+  const { app } = await buildApp({ ...loadConfig({}), databaseUrl: url, uploadDir: mkdtempSync(join(tmpdir(), 'igo-uploads-')) }, db, { engines, moveDelayMs: 0, aiVsAiDelayMs: 0 });
   await app.listen({ port: 0, host: '127.0.0.1' });
   base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   close = async () => {
@@ -498,5 +502,70 @@ describe('lobby', () => {
 
     expect((await emit(sa, 'follow:set', ids.black1, false)).ok).toBe(true);
     expect((await emit(sa, 'follow:list')).ids).toEqual([]);
+  });
+});
+
+describe('profile', () => {
+  const patch = async (cookie: string, body: object) =>
+    fetch(`${base}/api/me/profile`, { method: 'PATCH', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+  it('changes the nickname once a day and the declared rank while few games are played', async () => {
+    const cookie = await login('alice');
+    const before = await (await fetch(`${base}/api/me/profile`, { headers: { cookie } })).json();
+    expect(before.profile).toMatchObject({ displayName: null, declaredRank: '3d', rankResetsRating: true });
+    expect(before.user.displayName).toBe('alice');
+
+    expect((await (await patch(cookie, { displayName: '公式アカウント' })).json()).error).toBe('reserved_display_name');
+    expect((await (await patch(cookie, { displayName: 'a\u200bb' })).json()).error).toBe('invalid_display_name');
+    const ok = await (await patch(cookie, { displayName: ' アリス ' })).json();
+    expect(ok.user.displayName).toBe('アリス');
+    expect(ok.profile.nameChangeAt).toBeGreaterThan(Date.now());
+    const again = await patch(cookie, { displayName: 'ありす' });
+    expect(again.status).toBe(429);
+    expect((await again.json()).error).toBe('display_name_cooldown');
+
+    const ranked = await (await patch(cookie, { declaredRank: '1k' })).json();
+    expect(ranked.profile.declaredRank).toBe('1k');
+    expect(ranked.user.rank).toBe('1級');
+    expect((await patch(cookie, { declaredRank: '45k' })).status).toBe(400);
+    expect((await patch(cookie, { role: 'admin' })).status).toBe(400);
+  });
+
+  it('stores a picture as WebP without its metadata, and removes it', async () => {
+    const cookie = await login('alice');
+    const png = await sharp({ create: { width: 600, height: 400, channels: 3, background: '#c33' } })
+      .withMetadata({ exif: { IFD0: { Copyright: 'secret place' } } })
+      .jpeg()
+      .toBuffer();
+    const upload = (data: Buffer, name: string, type: string) => {
+      const form = new FormData();
+      form.append('file', new Blob([new Uint8Array(data)], { type }), name);
+      return fetch(`${base}/api/me/avatar`, { method: 'POST', headers: { cookie }, body: form });
+    };
+    const res = await upload(png, 'me.jpg', 'image/jpeg');
+    expect(res.status).toBe(200);
+    const { user } = await res.json();
+    expect(user.avatarUrl).toMatch(/^\/avatars\/[0-9a-f-]{36}-256\.webp$/);
+    const img = await fetch(`${base}${user.avatarUrl}`);
+    expect(img.headers.get('content-type')).toBe('image/webp');
+    const meta = await sharp(Buffer.from(await img.arrayBuffer())).metadata();
+    expect([meta.width, meta.height, meta.exif]).toEqual([256, 256, undefined]);
+    expect((await fetch(`${base}${user.avatarUrl.replace('-256', '-64')}`)).status).toBe(200);
+
+    // Judged by content: a script named .png is refused.
+    const fake = await upload(Buffer.from('<svg onload=alert(1)>'), 'x.png', 'image/png');
+    expect((await fake.json()).error).toBe('invalid_image');
+    expect((await fetch(`${base}/avatars/..%2F..%2Fetc%2Fpasswd`)).status).toBe(404);
+
+    const removed = await (await fetch(`${base}/api/me/avatar`, { method: 'DELETE', headers: { cookie } })).json();
+    expect(removed.user.avatarUrl).toBeNull();
+    expect((await fetch(`${base}${user.avatarUrl}`)).status).toBe(404);
+  });
+
+  it('counts finished games towards the level', async () => {
+    const p = await (await fetch(`${base}/api/users/black1`)).json();
+    // The full game in "play" counts; games resigned before 4 moves do not.
+    expect(p.gamesCompleted).toBe(1);
+    expect(p.user.level).toBe(1);
   });
 });

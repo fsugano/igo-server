@@ -5,6 +5,8 @@ import { useAuth } from './auth';
 import { MessagesPage } from './pages/MessagesPage';
 import { useSocial } from './social';
 import { ChallengeCenter } from './components/ChallengeCenter';
+import { Avatar } from './components/UserBits';
+import { SettingsPage } from './pages/SettingsPage';
 import { AdminPage } from './pages/AdminPage';
 import { BroadcastPage } from './pages/BroadcastPage';
 import { GamePage } from './pages/GamePage';
@@ -53,7 +55,7 @@ export function App() {
                 メッセージ{unread > 0 && <span className="count" aria-label={`未読${unread}件`}>{unread}</span>}
               </Link>
               <Link to={`/u/${user.username}`} className="me">
-                {user.username} <span className="rank">{user.rank}</span>
+                <Avatar u={user} size={24} /> {user.displayName} <span className="rank">{user.rank}</span>
               </Link>
               <button className="link" onClick={() => void logout()}>
                 ログアウト
@@ -72,6 +74,7 @@ export function App() {
           <Route path="/u/:username" element={<ProfilePage />} />
           <Route path="/admin" element={<AdminPage />} />
           <Route path="/messages" element={<MessagesPage />} />
+          <Route path="/settings/profile" element={<SettingsPage />} />
           <Route path="/messages/:userId" element={<MessagesPage />} />
           <Route path="*" element={<p className="empty">ページが見つかりません</p>} />
         </Routes>

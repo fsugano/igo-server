@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { errorText } from '../api';
 import { useAuth } from '../auth';
 import { call, getSocket } from '../socket';
-import { BotBadge } from './BotBadge';
+import { Avatar, LevelBadge, UserName } from './UserBits';
 import { GameForm, colorLabel, describeConditions, otherColor } from './GameForm';
 import { Modal } from './Modal';
 
@@ -49,12 +49,12 @@ export function ChallengeCenter() {
       // Read the list from the ref: a state updater may run twice, and the note must be shown once.
       const c = openRef.current.find((x) => x.id === u.id);
       if (c && c.from.id === user.id) {
-        const to = c.to.username;
+        const to = c.to.displayName;
         if (u.outcome === 'declined') note(`${to}さんに断られました${u.reason ? `：「${u.reason}」` : ''}`);
         if (u.outcome === 'expired') note(`${to}さんから返事がありませんでした`);
         if (u.outcome === 'cancelled') note(`${to}さんへの申し込みは取り消されました`);
         if (u.outcome === 'countered') note(`${to}さんが条件を変えて返しました`);
-      } else if (c && u.outcome === 'cancelled') note(`${c.from.username}さんの申し込みは取り消されました`);
+      } else if (c && u.outcome === 'cancelled') note(`${c.from.displayName}さんの申し込みは取り消されました`);
       setOpen((list) => list.filter((x) => x.id !== u.id));
     };
     load();
@@ -67,6 +67,15 @@ export function ChallengeCenter() {
       s.off('challenge:updated', onUpdated);
     };
   }, [user?.id]);
+
+  // A short note when a finished game raises my level.
+  const levelRef = useRef<{ id: string; level: number } | null>(null);
+  useEffect(() => {
+    if (!user) return;
+    const prev = levelRef.current;
+    if (prev && prev.id === user.id && user.level > prev.level) note(`レベルが上がりました！ Lv${user.level}`);
+    levelRef.current = { id: user.id, level: user.level };
+  }, [user?.id, user?.level]);
 
   useEffect(() => {
     if (!open.length) return;
@@ -86,7 +95,7 @@ export function ChallengeCenter() {
         {outgoing && (
           <div className="toast">
             <span>
-              {outgoing.to.username}さんに申し込み中…（残り{secondsLeft(outgoing, now)}秒）
+              {outgoing.to.displayName}さんに申し込み中…（残り{secondsLeft(outgoing, now)}秒）
             </span>
             <button
               onClick={() =>
@@ -110,10 +119,13 @@ export function ChallengeCenter() {
 }
 
 const Who = ({ u }: { u: PublicUser }) => (
-  <>
-    <strong>{u.username}</strong> <span className="rank">{u.rank}</span>
-    <BotBadge user={u} />
-  </>
+  <span className="who-line">
+    <Avatar u={u} size={32} />
+    <strong>
+      <UserName u={u} />
+    </strong>
+    <LevelBadge level={u.level} />
+  </span>
 );
 
 function Incoming({ c, left }: { c: Challenge; left: number }) {

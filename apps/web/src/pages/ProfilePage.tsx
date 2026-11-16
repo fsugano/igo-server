@@ -3,7 +3,9 @@ import { Link, useParams } from 'react-router-dom';
 import { api, errorText } from '../api';
 import { useAuth } from '../auth';
 import { PlayerStats } from '../components/PlayerStats';
+import { Avatar, LevelBadge } from '../components/UserBits';
 import { useSocial } from '../social';
+import { declaredRankLabel } from '@igo/shared';
 import { resultText } from './GamePage';
 
 export function ProfilePage() {
@@ -38,13 +40,27 @@ export function ProfilePage() {
 
   return (
     <div className="card">
-      <h2>
-        {user.username} <span className="rank">{user.rank}</span>
-        {user.premium && <span className="badge">プレミアム</span>}
-      </h2>
-      <p className="meta">
-        レーティング {user.rating} · レート対局 {user.gamesPlayed}局 · 直近{finished.length}局で{wins}勝
-      </p>
+      <div className="profile-head">
+        <Avatar u={user} size={88} />
+        <div>
+          <h2>
+            {user.displayName}
+            {user.displayName !== user.username && <span className="handle"> @{user.username}</span>} <span className="rank">{user.rank}</span>
+            {!user.bot && <LevelBadge level={user.level} />}
+            {user.premium && <span className="badge">プレミアム</span>}
+          </h2>
+          <p className="meta">
+            レーティング {user.rating} · レート対局 {user.gamesPlayed}局 · 直近{finished.length}局で{wins}勝
+            {!user.bot && ` · 終局まで打った対局 ${data.gamesCompleted}局`}
+            {data.declaredRank && declaredRankLabel(data.declaredRank) !== user.rank && ` · 申告棋力 ${declaredRankLabel(data.declaredRank)}`}
+          </p>
+          {mine && (
+            <Link className="button" to="/settings/profile">
+              プロフィールを編集
+            </Link>
+          )}
+        </div>
+      </div>
       {!user.bot && (
         <p className="meta">
           フォロー {follows.following} · フォロワー {follows.followers}

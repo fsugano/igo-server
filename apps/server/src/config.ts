@@ -15,6 +15,8 @@ export interface Config {
   trustProxy: boolean | number | string;
   /** Browser origins allowed to open the realtime connection. Empty: only the server's own origin. */
   allowedOrigins: string[];
+  /** Where profile pictures are kept (absolute). Production should put a volume or object storage behind it. */
+  uploadDir: string;
 }
 
 export function loadConfig(env = process.env): Config {
@@ -35,6 +37,7 @@ export function loadConfig(env = process.env): Config {
       .split(',')
       .map((s) => s.trim().replace(/\/$/, ''))
       .filter(Boolean),
+    uploadDir: resolve(env.UPLOAD_DIR ?? 'data/uploads'),
   };
 }
 

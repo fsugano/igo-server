@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { errorText } from '../api';
 import { useAuth } from '../auth';
 import { ChallengeDialog } from '../components/ChallengeDialog';
+import { Avatar, UserName } from '../components/UserBits';
 import { useSocial } from '../social';
 import { call } from '../socket';
 
@@ -36,9 +37,9 @@ export function MessagesPage() {
             {conversations.map((c) => (
               <li key={c.user.id}>
                 <Link to={`/messages/${c.user.id}`} className={c.user.id === userId ? 'active' : ''}>
-                  <span className="avatar">{c.user.username.slice(0, 1).toUpperCase()}</span>
+                  <Avatar u={c.user} />
                   <span className="who">
-                    <strong>{c.user.username}</strong>
+                    <strong>{c.user.displayName}</strong>
                     <small>{c.last.fromId === user.id ? `あなた：${c.last.text}` : c.last.text}</small>
                   </span>
                   <span className="side-info">
@@ -109,9 +110,10 @@ function Thread({ userId }: { userId: string }) {
         </button>
         {other ? (
           <>
-            <Link to={`/u/${other.username}`}>
-              <strong>{other.username}</strong> <span className="rank">{other.rank}</span>
-            </Link>
+            <Avatar u={other} size={32} />
+            <strong>
+              <UserName u={other} link />
+            </strong>
             <span className="grow" />
             <button onClick={() => void setFollow(userId, !follows).then((e) => e && setError(errorText(e)))}>
               {follows ? 'フォロー中' : 'フォローする'}

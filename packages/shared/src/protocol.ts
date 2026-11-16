@@ -12,6 +12,12 @@ export interface PublicUser {
   premium: boolean;
   /** A computer player. */
   bot: boolean;
+  /** Nickname shown first; the username when none is set. */
+  displayName: string;
+  /** 256×256 WebP, or null for the default picture. The 64×64 one is at the same path with -64 instead of -256. */
+  avatarUrl: string | null;
+  /** How much the person has played (not how strong they are). */
+  level: number;
 }
 
 export interface SeekRequest {
@@ -204,6 +210,8 @@ export interface ServerToClientEvents {
   'challenge:updated': (update: ChallengeUpdate) => void;
   /** A message to or from me (sent to all my tabs). */
   'dm:message': (msg: DirectMessage, from: PublicUser) => void;
+  /** My own details changed (rating, level after a game). */
+  'user:updated': (user: PublicUser) => void;
   'game:start': (gameId: string) => void;
   'game:update': (game: GameView) => void;
   'game:chat': (gameId: string, msg: ChatMessage) => void;

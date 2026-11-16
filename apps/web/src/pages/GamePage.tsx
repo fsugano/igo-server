@@ -5,6 +5,7 @@ import { GameRecord, api, errorText } from '../api';
 import { useAuth } from '../auth';
 import { Board, pointName } from '../components/Board';
 import { BotBadge } from '../components/BotBadge';
+import { Avatar } from '../components/UserBits';
 import { Clock } from '../components/Clock';
 import { Gauge, useGauge } from '../components/Gauge';
 import { NarrationChoice, NarrationSelect, loadNarrationChoice, saveNarrationChoice, useNarration } from '../components/Narration';
@@ -122,7 +123,7 @@ function LiveGame({ initial }: { initial: GameView }) {
   const spectating = me === null;
   useNarration({
     view,
-    names: spectating ? { black: view.black.username, white: view.white.username } : null,
+    names: spectating ? { black: view.black.displayName, white: view.white.displayName } : null,
     gauge: spectating ? gauge : null,
     lang: spectating ? narration : 'off',
   });
@@ -260,9 +261,12 @@ function PlayerRow(props: {
   return (
     <div className={`player${toMove ? ' to-move' : ''}`}>
       <span className={`dot ${color === BLACK ? 'black' : 'white'}`} />
+      <Avatar u={user} size={32} />
       <div className="who">
         <span>
-          <Link to={`/u/${user.username}`}>{user.username}</Link>
+          <Link to={`/u/${user.username}`} title={`@${user.username}`}>
+            {user.displayName}
+          </Link>
           <BotBadge user={user} />
         </span>{' '}
         <span className="rank">{user.rank}</span>

@@ -1,10 +1,12 @@
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
 import helmet from '@fastify/helmet';
+import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import {
   Ack,
   BLACK,
+  DECLARED_RANK_GAMES,
   ClientToServerEvents,
   Game,
   GameSettings,
@@ -16,12 +18,16 @@ import {
   ServerToClientEvents,
   StatsGame,
   WHITE,
+  checkDisplayName,
+  gamesForLevel,
   judgeStyle,
+  levelFor,
   playerRecord,
   ratingForRank,
 } from '@igo/shared';
 import Fastify, { FastifyReply, FastifyRequest } from 'fastify';
-import { existsSync } from 'node:fs';
+import { createReadStream, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { Server, Socket } from 'socket.io';
 import { z } from 'zod';
 import { BuiltinEvaluator, Evaluator, GaugeService } from './ai/gauge.js';
@@ -30,6 +36,7 @@ import { Engine, loadEngines } from './ai/index.js';
 import type { Config } from './config.js';
 import type { Db } from './db.js';
 import { BotOptions, GameService, LiveGame, buildSgf, copyGame } from './games.js';
+import { AVATAR_FILE, AVATAR_MAX_BYTES, removeAvatar, saveAvatar } from './avatars.js';
 import { Challenges } from './challenges.js';
 import { Lobby, aiGameSchema, validHandicap } from './lobby.js';
 import { LobbyChat } from './lobby-chat.js';
@@ -49,6 +56,12 @@ const registerSchema = z.object({
 });
 const loginSchema = z.object({ username: z.string().max(32), password: z.string().max(200) });
 const accountSettingsSchema = z.object({ allowRecording: z.boolean() }).strict();
+const profileSchema = z
+  .object({
+    displayName: z.string().max(100).optional(),
+    declaredRank: registerSchema.shape.rank.optional(),
+  })
+  .strict();
 
 type IoSocket = Socket<ClientToServerEvents, ServerToClientEvents, {}, { user: PublicUser | null }>;
 
@@ -96,6 +109,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     crossOriginEmbedderPolicy: false,
   });
   await app.register(rateLimit, { global: false });
+  await app.register(multipart, { limits: { fileSize: AVATAR_MAX_BYTES, files: 1, fields: 0, parts: 1 } });
 
   const users = new Users(db);
   const lobby = new Lobby();
@@ -199,9 +213,10 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       const bot = g.black.bot ? g.black : g.white;
       if (bot.bot && !games.isAiOnly(g)) botSay(g.id, bot, LINES.thanks);
       chatCounts.delete(g.id);
+      // New rating and level.
       for (const id of [g.black.id, g.white.id]) {
         const u = await users.byId(id);
-        if (u) lobby.updateUser(toPublicUser(u));
+        if (u && !u.bot) userChanged(u);
       }
       broadcastLobby();
     },
@@ -252,7 +267,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       const error = field === 'username' || field === 'password' || field === 'rank' ? `invalid_${field}` : 'invalid_input';
       return reply.code(400).send({ error });
     }
-    const u = await users.create(p.data.username, p.data.password, ratingForRank(p.data.rank));
+    const u = await users.create(p.data.username, p.data.password, ratingForRank(p.data.rank), p.data.rank.toLowerCase());
     if (u === 'taken') return reply.code(409).send({ error: 'username_taken' });
     await startSession(reply, u);
     return { user: toPublicUser(u) };
@@ -291,6 +306,108 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     if (!p.success) return reply.code(400).send({ error: 'invalid_input' });
     await users.setAllowRecording(u.id, p.data.allowRecording);
     return { account: { role: u.role, allowRecording: p.data.allowRecording } };
+  });
+
+  // ---- Profile ----
+
+  /** What the profile editor shows. */
+  const profileOf = (u: UserRow) => {
+    const level = levelFor(u.games_completed);
+    const changed = u.display_name_changed_at ? new Date(u.display_name_changed_at).getTime() : 0;
+    return {
+      displayName: u.display_name,
+      declaredRank: u.declared_rank,
+      /** When the nickname may be changed again (ms), null if now. */
+      nameChangeAt: changed && changed + 86_400_000 > Date.now() ? changed + 86_400_000 : null,
+      /** Whether changing the declared rank still resets the rating. */
+      rankResetsRating: u.games_played < DECLARED_RANK_GAMES,
+      gamesCompleted: u.games_completed,
+      level,
+      nextLevelAt: gamesForLevel(level + 1),
+    };
+  };
+  /** Shows a change in the lobby and in the person's other tabs. */
+  const userChanged = (u: UserRow) => {
+    const pu = toPublicUser(u);
+    lobby.updateUser(pu);
+    io.to(userRoom(pu.id)).emit('user:updated', pu);
+    broadcastLobby();
+    return pu;
+  };
+
+  app.get('/api/me/profile', async (req, reply) => {
+    const u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    return { user: toPublicUser(u), profile: profileOf(u) };
+  });
+
+  app.patch('/api/me/profile', async (req, reply) => {
+    let u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    const p = profileSchema.safeParse(req.body);
+    if (!p.success) return reply.code(400).send({ error: 'invalid_input' });
+    if (p.data.displayName !== undefined) {
+      const c = checkDisplayName(p.data.displayName);
+      if ('error' in c) return reply.code(400).send({ error: c.error });
+      if (c.name !== u.display_name) {
+        const r = await users.setDisplayName(u.id, c.name);
+        if (typeof r === 'string') return reply.code(429).send({ error: r });
+        u = r;
+      }
+    }
+    if (p.data.declaredRank !== undefined) {
+      const rank = p.data.declaredRank.toLowerCase();
+      u = (await users.setDeclaredRank(u.id, rank, ratingForRank(rank), DECLARED_RANK_GAMES)) ?? u;
+    }
+    return { user: userChanged(u), profile: profileOf(u) };
+  });
+
+  // At most 10 uploads a day per account (each one is decoded and re-encoded).
+  const avatarLimit = {
+    config: {
+      rateLimit: { max: 10, timeWindow: '1 day', keyGenerator: (req: FastifyRequest) => req.cookies[SESSION_COOKIE] ?? req.ip },
+    },
+  };
+
+  app.post('/api/me/avatar', avatarLimit, async (req, reply) => {
+    const u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    let data: Buffer;
+    try {
+      const file = await req.file();
+      if (!file) return reply.code(400).send({ error: 'invalid_image' });
+      data = await file.toBuffer();
+    } catch (e) {
+      if ((e as { code?: string }).code === 'FST_REQ_FILE_TOO_LARGE') return reply.code(413).send({ error: 'image_too_large' });
+      return reply.code(400).send({ error: 'invalid_image' });
+    }
+    const id = await saveAvatar(config.uploadDir, data);
+    if (typeof id !== 'string') return reply.code(400).send({ error: id.error });
+    const old = await users.setAvatar(u.id, id);
+    await removeAvatar(config.uploadDir, old);
+    const row = (await users.byId(u.id))!;
+    return { user: userChanged(row) };
+  });
+
+  app.delete('/api/me/avatar', async (req, reply) => {
+    const u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    const old = await users.setAvatar(u.id, null);
+    await removeAvatar(config.uploadDir, old);
+    const row = (await users.byId(u.id))!;
+    return { user: userChanged(row) };
+  });
+
+  /** Profile pictures. Names are random ids, new for each upload, so they are cached for good. */
+  app.get<{ Params: { file: string } }>('/avatars/:file', async (req, reply) => {
+    const f = req.params.file;
+    if (!AVATAR_FILE.test(f)) return reply.code(404).send({ error: 'not_found' });
+    const path = join(config.uploadDir, f);
+    if (!existsSync(path)) return reply.code(404).send({ error: 'not_found' });
+    return reply
+      .header('content-type', 'image/webp')
+      .header('cache-control', 'public, max-age=31536000, immutable')
+      .send(createReadStream(path));
   });
 
   // ---- Operators ----
@@ -368,6 +485,8 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     const viewer = await currentUser(req);
     return {
       user: toPublicUser(u),
+      declaredRank: u.declared_rank,
+      gamesCompleted: u.games_completed,
       follows: await social.counts(u.id),
       following: viewer && viewer.id !== u.id ? await social.isFollowing(viewer.id, u.id) : null,
       games: r.rows.map((g) => ({

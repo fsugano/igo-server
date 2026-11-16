@@ -2,7 +2,7 @@ import type { PublicUser, SeekRequest } from '@igo/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CHALLENGE_TTL_MS, Challenges } from '../src/challenges.js';
 
-const user = (id: string, bot = false): PublicUser => ({ id, username: `u${id}`, rating: 1500, rank: '1級', gamesPlayed: 0, premium: false, bot });
+const user = (id: string, bot = false): PublicUser => ({ id, username: `u${id}`, rating: 1500, rank: '1級', gamesPlayed: 0, premium: false, bot, displayName: `u${id}`, avatarUrl: null, level: 1 });
 const req: SeekRequest = {
   size: 19,
   komi: 6.5,

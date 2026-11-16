@@ -7,6 +7,7 @@ import { useAuth } from '../auth';
 import { BotBadge } from '../components/BotBadge';
 import { CLOCK_PRESETS, GameForm, colorLabel, rulesLabel, sizeLabel } from '../components/GameForm';
 import { Modal } from '../components/Modal';
+import { Avatar, LevelBadge, UserName } from '../components/UserBits';
 import { useSocial } from '../social';
 import { call, getSocket } from '../socket';
 
@@ -134,8 +135,6 @@ export function LobbyPage() {
   );
 }
 
-const initial = (name: string) => name.slice(0, 1).toUpperCase();
-
 function OnlineList({
   lobby,
   me,
@@ -161,7 +160,7 @@ function OnlineList({
   const people = lobby.online
     .filter(
       (u) =>
-        (!q || u.username.toLowerCase().includes(q)) &&
+        (!q || u.username.toLowerCase().includes(q) || u.displayName.toLowerCase().includes(q)) &&
         (!onlyAvailable || u.status === 'available') &&
         (!onlyFollowing || following.has(u.id)),
     )
@@ -213,14 +212,15 @@ function OnlineList({
         {people.map((u) => (
           <li key={u.id}>
             <button className={`person${u.id === user?.id ? ' me' : ''}`} onClick={() => onOpen(u)}>
-              <span className="avatar">{initial(u.username)}</span>
+              <Avatar u={u} />
               <span className="who">
                 <strong>
-                  {u.username}
+                  {u.displayName}
                   {following.has(u.id) && <span className="follow-mark" title="フォロー中"> ★</span>}
                 </strong>
                 <small>
-                  {u.rank} · {u.rating}
+                  {u.displayName !== u.username && `@${u.username} · `}
+                  {u.rank} · Lv{u.level}
                   {u.id === user?.id && ' · あなた'}
                 </small>
               </span>
@@ -250,15 +250,15 @@ function UserSheet({ u, offline, onClose }: { u: OnlineUser; offline: boolean; o
   };
 
   return (
-    <Modal title={u.username} onClose={onClose}>
+    <Modal title={u.displayName} onClose={onClose}>
       <div className="sheet-head">
-        <span className="avatar large">{initial(u.username)}</span>
+        <Avatar u={u} size={64} />
         <div>
           <div>
-            <strong>{u.username}</strong> <span className="rank">{u.rank}</span>
+            <UserName u={u} /> <LevelBadge level={u.level} />
           </div>
           <small className="meta">
-            レーティング {u.rating} · {u.gamesPlayed}局
+            レーティング {u.rating} · レート対局 {u.gamesPlayed}局
           </small>
           <div>
             <span className={`presence ${u.status}`}>{offline ? 'オフライン' : STATUS_LABEL[u.status]}</span>
@@ -317,7 +317,7 @@ function SeekList({ lobby, onAccept, onCancel }: { lobby: LobbyState; onAccept: 
         {lobby.seeks.map((s) => (
           <tr key={s.id}>
             <td>
-              <Link to={`/u/${s.creator.username}`}>{s.creator.username}</Link> <span className="rank">{s.creator.rank}</span>
+              <UserName u={s.creator} link />
             </td>
             <td>
               {sizeLabel(s.size)} · {s.handicap ? `${s.handicap}子` : `コミ${s.komi}`} · {rulesLabel(s.ruleset)} ·{' '}
@@ -347,8 +347,8 @@ function GameList({ lobby }: { lobby: LobbyState }) {
       {lobby.games.map((g) => (
         <li key={g.id}>
           <Link to={`/game/${g.id}`}>
-            ● {g.black.username} <span className="rank">{g.black.rank}</span>
-            <BotBadge user={g.black} /> vs ○ {g.white.username} <span className="rank">{g.white.rank}</span>
+            ● {g.black.displayName} <span className="rank">{g.black.rank}</span>
+            <BotBadge user={g.black} /> vs ○ {g.white.displayName} <span className="rank">{g.white.rank}</span>
             <BotBadge user={g.white} />
           </Link>
           <small>
@@ -391,7 +391,7 @@ function LobbyChat({ messages }: { messages: LobbyChatMessage[] }) {
             {messages.length ? (
               messages.map((m) => (
                 <p key={m.id}>
-                  <Link to={`/u/${m.user.username}`}>{m.user.username}</Link> <span className="rank">{m.user.rank}</span>
+                  <UserName u={m.user} link />
                   <time>{timeOf(m.at)}</time>
                   <br />
                   {m.text}

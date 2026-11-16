@@ -468,3 +468,18 @@ input, select {
   .messages:not(.open) .empty-thread { display: none; }
   .thread-head .back { display: inline; }
 }
+
+/* ---- Profile ---- */
+img.avatar { object-fit: cover; }
+.handle { color: var(--muted); font-weight: 400; font-size: 0.85em; }
+.level { margin-left: 6px; font-size: 12px; font-weight: 600; padding: 1px 7px; border-radius: 99px; background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); white-space: nowrap; }
+.topbar .me { display: inline-flex; align-items: center; gap: 6px; }
+.who-line { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.profile-head { display: flex; gap: 18px; align-items: center; margin-bottom: 8px; }
+.profile-head h2 { margin-bottom: 4px; }
+.settings { max-width: 640px; margin: 0 auto; }
+.settings section { border-top: 1px solid var(--line); padding: 12px 0; }
+.settings h3 { margin: 4px 0 10px; font-size: 15px; }
+.avatar-edit { display: flex; gap: 16px; align-items: center; margin-bottom: 6px; }
+.level-bar { height: 10px; border-radius: 99px; background: var(--line); overflow: hidden; }
+.level-bar span { display: block; height: 100%; background: var(--ok); }

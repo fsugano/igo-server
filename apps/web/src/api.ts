@@ -40,6 +40,18 @@ export interface GameRecord {
   startedAt: number;
 }
 
+/** The profile editor's view of my own profile. */
+export interface MyProfile {
+  displayName: string | null;
+  declaredRank: string | null;
+  /** When the nickname may be changed again (ms), null if now. */
+  nameChangeAt: number | null;
+  rankResetsRating: boolean;
+  gamesCompleted: number;
+  level: number;
+  nextLevelAt: number;
+}
+
 /** Private to the signed-in user. */
 export interface Account {
   role: Role;
@@ -53,6 +65,18 @@ export interface AdminSettings {
 
 export const api = {
   me: () => request<{ user: PublicUser | null; account: Account | null }>('/api/me'),
+  myProfile: () => request<{ user: PublicUser; profile: MyProfile }>('/api/me/profile'),
+  saveProfile: (patch: { displayName?: string; declaredRank?: string }) =>
+    request<{ user: PublicUser; profile: MyProfile }>('/api/me/profile', { method: 'PATCH', body: JSON.stringify(patch) }),
+  uploadAvatar: async (file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch('/api/me/avatar', { method: 'POST', body: form, credentials: 'same-origin' });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(body.error ?? `http_${res.status}`);
+    return body as { user: PublicUser };
+  },
+  deleteAvatar: () => request<{ user: PublicUser }>('/api/me/avatar', { method: 'DELETE' }),
   setAllowRecording: (allowRecording: boolean) =>
     request<{ account: Account }>('/api/me/settings', { method: 'PATCH', body: JSON.stringify({ allowRecording }) }),
   adminSettings: () => request<AdminSettings>('/api/admin/settings'),
@@ -73,6 +97,8 @@ export const api = {
   profile: (username: string) =>
     request<{
       user: PublicUser;
+      declaredRank: string | null;
+      gamesCompleted: number;
       games: ProfileGame[];
       follows: { following: number; followers: number };
       /** Whether I follow them; null when it is me or I am not logged in. */
@@ -123,6 +149,11 @@ const ERRORS: Record<string, string> = {
   no_such_challenge: 'その申し込みは締め切られました',
   not_your_challenge: 'この申し込みには返事できません',
   counter_once: '条件の変更は1回までです',
+  invalid_display_name: 'ニックネームは1〜20文字で、改行や見えない文字は使えません',
+  reserved_display_name: '運営・公式・admin などの言葉や「AI-」で始まる名前は使えません',
+  display_name_cooldown: 'ニックネームの変更は1日1回までです',
+  invalid_image: 'JPEG・PNG・WebP の画像を選んでください',
+  image_too_large: '画像は5MBまでです',
 };
 
 export const errorText = (code: string) => ERRORS[code] ?? code;
