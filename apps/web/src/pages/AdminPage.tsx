@@ -12,6 +12,11 @@ export function AdminPage() {
   if (!canBroadcast(account?.role)) return <p className="empty">このページは運営だけが使えます</p>;
   return (
     <div className="admin">
+      {account?.role === 'admin' && (
+        <p className="notice admin-links">
+          <Link to="/admin/news">お知らせの管理</Link>
+        </p>
+      )}
       <SettingsCard canEdit={account?.role === 'admin'} />
       <LiveGames />
     </div>

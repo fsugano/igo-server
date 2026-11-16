@@ -483,3 +483,41 @@ img.avatar { object-fit: cover; }
 .avatar-edit { display: flex; gap: 16px; align-items: center; margin-bottom: 6px; }
 .level-bar { height: 10px; border-radius: 99px; background: var(--line); overflow: hidden; }
 .level-bar span { display: block; height: 100%; background: var(--ok); }
+
+/* ---- News ---- */
+.admin-links { grid-column: 1 / -1; margin: 0; }
+.news { max-width: 820px; margin: 0 auto 16px; }
+.news-tabs { flex-wrap: wrap; }
+.news-tabs button { flex: 0 1 auto; }
+.news-list { list-style: none; margin: 0; padding: 0; }
+.news-list a { display: flex; flex-direction: column; gap: 4px; padding: 12px 4px; border-bottom: 1px solid var(--line); color: var(--text); }
+.news-list a:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); text-decoration: none; }
+.news-meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin: 0; }
+.news-title { font-weight: 600; }
+.news-cat { font-size: 12px; padding: 1px 8px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.news-cat.maintenance { color: #a15c00; border-color: #e5b66b; }
+.news-cat.update { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, transparent); }
+.news-cat.event { color: #6b46c1; border-color: #b9a3e8; }
+.news-cat.important { color: #fff; background: var(--danger); border-color: var(--danger); }
+.news .more { margin-top: 12px; width: 100%; }
+.news-banners { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; }
+.news-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger) 10%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+}
+.news-banner a { flex: 1; color: var(--text); font-weight: 600; }
+.news-banner .close { font-size: 20px; color: var(--muted); }
+.markdown { line-height: 1.8; overflow-wrap: anywhere; }
+.markdown pre { background: var(--bg); padding: 10px; border-radius: 6px; overflow-x: auto; }
+.markdown code { font-family: ui-monospace, monospace; font-size: 0.9em; }
+.markdown blockquote { margin: 8px 0; padding-left: 12px; border-left: 3px solid var(--line); color: var(--muted); }
+.admin-news { max-width: 960px; margin: 0 auto; }
+.row-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.row-head h2 { margin: 0; }
+.row-head .grow { flex: 1; }
+.form textarea { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; resize: vertical; }

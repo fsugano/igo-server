@@ -569,3 +569,55 @@ describe('profile', () => {
     expect(p.user.level).toBe(1);
   });
 });
+
+describe('news', () => {
+  const draft = {
+    title: 'メンテナンスのお知らせ',
+    body: '# 作業内容\n\n**サーバーを更新**します。<script>alert(1)</script>',
+    category: 'maintenance',
+    important: true,
+    pinned: false,
+    publishAt: null,
+    expireAt: null,
+  };
+  const send = (method: string, path: string, cookie: string, body?: object) =>
+    fetch(`${base}${path}`, {
+      method,
+      headers: body ? { cookie, 'content-type': 'application/json' } : { cookie },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+
+  it('lets admins write, schedule and publish news, and counts unread', async () => {
+    await db.query("UPDATE users SET role = 'admin' WHERE username = 'alice'");
+    const admin = await login('alice');
+    const reader = await login('black1');
+    expect((await send('POST', '/api/admin/news', reader, draft)).status).toBe(403);
+    expect((await send('POST', '/api/admin/news', admin, { ...draft, category: 'other' })).status).toBe(400);
+
+    const unreadBefore = (await (await send('GET', '/api/news/unread-count', reader)).json()).count;
+    const created = await (await send('POST', '/api/admin/news', admin, draft)).json();
+    expect(created.item.publishAt).toBeNull();
+    // A draft is not shown.
+    expect((await fetch(`${base}/api/news/${created.item.id}`)).status).toBe(404);
+    const later = await (await send('POST', '/api/admin/news', admin, { ...draft, title: '来週のイベント', category: 'event', important: false, publishAt: Date.now() + 3_600_000 })).json();
+    expect((await (await fetch(`${base}/api/news`)).json()).items.map((n: any) => n.id)).not.toContain(later.item.id);
+
+    const s = await connect(reader);
+    const heard = nextEvent<any>(s, 'news:published');
+    const published = await send('PATCH', `/api/admin/news/${created.item.id}`, admin, { ...draft, publishAt: Date.now() - 1000 });
+    expect(published.status).toBe(200);
+    expect(await heard).toMatchObject({ id: created.item.id, title: 'メンテナンスのお知らせ' });
+    expect((await heard).body).toBeUndefined();
+
+    const list = await (await fetch(`${base}/api/news?category=maintenance`)).json();
+    expect(list.items[0]).toMatchObject({ id: created.item.id, important: true });
+    expect((await (await fetch(`${base}/api/news/important`)).json()).items[0].id).toBe(created.item.id);
+    expect((await (await send('GET', '/api/news/unread-count', reader)).json()).count).toBe(unreadBefore + 1);
+    await send('POST', '/api/news/read', reader);
+    expect((await (await send('GET', '/api/news/unread-count', reader)).json()).count).toBe(0);
+
+    expect((await send('DELETE', `/api/admin/news/${later.item.id}`, admin)).status).toBe(200);
+    const audit = await db.query("SELECT action FROM admin_audit WHERE action LIKE 'news.%' ORDER BY id");
+    expect(audit.rows.map((r) => r.action)).toEqual(['news.create', 'news.create', 'news.update', 'news.delete']);
+  });
+});

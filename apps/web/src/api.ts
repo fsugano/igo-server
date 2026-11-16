@@ -1,4 +1,4 @@
-import type { AppSettings, ClockSettings, GameSettings, Move, PlayStyle, PlayerRecord, PublicUser, RECORDING_METHODS, RecordingMethod, Role } from '@igo/shared';
+import type { NewsItem, AppSettings, ClockSettings, GameSettings, Move, PlayStyle, PlayerRecord, PublicUser, RECORDING_METHODS, RecordingMethod, Role } from '@igo/shared';
 
 export class ApiError extends Error {}
 
@@ -77,6 +77,23 @@ export const api = {
     return body as { user: PublicUser };
   },
   deleteAvatar: () => request<{ user: PublicUser }>('/api/me/avatar', { method: 'DELETE' }),
+  news: (category?: string, before?: string) => {
+    const q = new URLSearchParams();
+    if (category) q.set('category', category);
+    if (before) q.set('before', before);
+    return request<{ items: NewsItem[]; more: boolean }>(`/api/news?${q}`);
+  },
+  newsItem: (id: string) => request<{ item: NewsItem }>(`/api/news/${encodeURIComponent(id)}`),
+  importantNews: () => request<{ items: NewsItem[] }>('/api/news/important'),
+  newsUnread: () => request<{ count: number }>('/api/news/unread-count'),
+  newsRead: () => request<{ ok: true }>('/api/news/read', { method: 'POST' }),
+  adminNews: () => request<{ items: NewsItem[] }>('/api/admin/news'),
+  saveNews: (id: string | null, n: Omit<NewsItem, 'id'>) =>
+    request<{ item: NewsItem }>(id ? `/api/admin/news/${id}` : '/api/admin/news', {
+      method: id ? 'PATCH' : 'POST',
+      body: JSON.stringify(n),
+    }),
+  deleteNews: (id: string) => request<{ ok: true }>(`/api/admin/news/${id}`, { method: 'DELETE' }),
   setAllowRecording: (allowRecording: boolean) =>
     request<{ account: Account }>('/api/me/settings', { method: 'PATCH', body: JSON.stringify({ allowRecording }) }),
   adminSettings: () => request<AdminSettings>('/api/admin/settings'),
@@ -154,6 +171,8 @@ const ERRORS: Record<string, string> = {
   display_name_cooldown: 'ニックネームの変更は1日1回までです',
   invalid_image: 'JPEG・PNG・WebP の画像を選んでください',
   image_too_large: '画像は5MBまでです',
+  invalid_news: 'タイトル（100文字まで）・本文・日時を確認してください。掲載終了は公開より後にしてください',
+  not_found: '見つかりません',
 };
 
 export const errorText = (code: string) => ERRORS[code] ?? code;

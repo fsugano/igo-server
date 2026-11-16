@@ -158,6 +158,27 @@ export interface Conversation {
   unread: number;
 }
 
+export type NewsCategory = 'info' | 'maintenance' | 'update' | 'event';
+export const NEWS_CATEGORIES: Record<NewsCategory, string> = {
+  info: 'お知らせ',
+  maintenance: 'メンテナンス',
+  update: 'アップデート',
+  event: 'イベント',
+};
+
+export interface NewsItem {
+  id: string;
+  title: string;
+  /** Markdown (raw HTML is not rendered). */
+  body: string;
+  category: NewsCategory;
+  important: boolean;
+  pinned: boolean;
+  /** null while a draft. */
+  publishAt: number | null;
+  expireAt: number | null;
+}
+
 export type Ack<T = {}> = (res: ({ ok: true } & T) | { ok: false; error: string }) => void;
 
 export interface ClientToServerEvents {
@@ -212,6 +233,8 @@ export interface ServerToClientEvents {
   'dm:message': (msg: DirectMessage, from: PublicUser) => void;
   /** My own details changed (rating, level after a game). */
   'user:updated': (user: PublicUser) => void;
+  /** A news item has just become visible (the body is fetched when opened). */
+  'news:published': (item: Omit<NewsItem, 'body'>) => void;
   'game:start': (gameId: string) => void;
   'game:update': (game: GameView) => void;
   'game:chat': (gameId: string, msg: ChatMessage) => void;

@@ -11,6 +11,7 @@ import {
   Game,
   GameSettings,
   GaugeState,
+  NewsItem,
   PublicUser,
   RECORDING_METHODS,
   Role,
@@ -40,6 +41,7 @@ import { AVATAR_FILE, AVATAR_MAX_BYTES, removeAvatar, saveAvatar } from './avata
 import { Challenges } from './challenges.js';
 import { Lobby, aiGameSchema, validHandicap } from './lobby.js';
 import { LobbyChat } from './lobby-chat.js';
+import { News, newsSchema } from './news.js';
 import { Settings } from './settings.js';
 import { Social } from './social.js';
 import { EventLimiter, originAllowed } from './socket-guard.js';
@@ -72,6 +74,8 @@ const MAX_AI_ONLY_GAMES_PER_USER = 1;
 const MAX_PERSON_AI_GAMES = Number(process.env.AI_MAX_GAMES ?? 20);
 /** How often expired sessions are removed. */
 const SESSION_SWEEP_MS = 60 * 60 * 1000;
+/** How often scheduled news is checked. */
+const NEWS_CHECK_MS = 30_000;
 
 export interface AppOptions extends Omit<BotOptions, 'engines'> {
   /** Computer players. Default: the built-in levels plus AI_GTP_ENGINES. */
@@ -115,6 +119,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
   const lobby = new Lobby();
   const lobbyChat = new LobbyChat(db);
   const social = new Social(db);
+  const news = new News(db);
   const settings = new Settings(db);
   await settings.load();
 
@@ -409,6 +414,101 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       .header('cache-control', 'public, max-age=31536000, immutable')
       .send(createReadStream(path));
   });
+
+  // ---- News ----
+
+  const publicCache = (reply: FastifyReply) => reply.header('cache-control', 'public, max-age=60');
+
+  app.get<{ Querystring: { category?: string; before?: string } }>('/api/news', async (req, reply) => {
+    const c = req.query.category;
+    if (c && !['info', 'maintenance', 'update', 'event'].includes(c)) return reply.code(400).send({ error: 'invalid_input' });
+    publicCache(reply);
+    return news.list(c, req.query.before);
+  });
+
+  app.get('/api/news/important', async (_req, reply) => {
+    // Not cached: the banner must show an urgent item at once.
+    reply.header('cache-control', 'no-cache');
+    return { items: await news.important() };
+  });
+
+  app.get('/api/news/unread-count', async (req, reply) => {
+    const u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    return { count: await news.unreadCount(u.id) };
+  });
+
+  app.post('/api/news/read', async (req, reply) => {
+    const u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    await news.markRead(u.id);
+    return { ok: true };
+  });
+
+  app.get<{ Params: { id: string } }>('/api/news/:id', async (req, reply) => {
+    const item = await news.get(req.params.id);
+    if (!item) return reply.code(404).send({ error: 'not_found' });
+    publicCache(reply);
+    return { item };
+  });
+
+  // Operators' news. Each change is written to the audit log.
+  const adminLimit = { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } };
+  /** Tells the people online about items that have become visible. */
+  const announce = (items: NewsItem[]) => {
+    // Without the body: it is fetched when opened. (An item may be announced twice; the page keeps one per id.)
+    for (const { body: _body, ...item } of items) io.emit('news:published', item);
+  };
+  const visibleNow = (n: { publishAt: number | null; expireAt: number | null }) =>
+    n.publishAt !== null && n.publishAt <= Date.now() && (n.expireAt === null || n.expireAt > Date.now());
+
+  app.get('/api/admin/news', adminLimit, async (req, reply) => {
+    if (!(await requireRole(req, reply, ['admin']))) return;
+    return { items: await news.all() };
+  });
+
+  app.post('/api/admin/news', adminLimit, async (req, reply) => {
+    const u = await requireRole(req, reply, ['admin']);
+    if (!u) return;
+    const p = newsSchema.safeParse(req.body);
+    if (!p.success) return reply.code(400).send({ error: 'invalid_news' });
+    const item = await news.create(p.data, u.id);
+    await news.audit(u.id, 'news.create', item.id, { title: item.title, publishAt: item.publishAt });
+    if (visibleNow(item)) announce([item]);
+    return { item };
+  });
+
+  app.patch<{ Params: { id: string } }>('/api/admin/news/:id', adminLimit, async (req, reply) => {
+    const u = await requireRole(req, reply, ['admin']);
+    if (!u) return;
+    const p = newsSchema.safeParse(req.body);
+    if (!p.success) return reply.code(400).send({ error: 'invalid_news' });
+    const before = await news.get(req.params.id, true);
+    const item = await news.update(req.params.id, p.data);
+    if (!item) return reply.code(404).send({ error: 'not_found' });
+    await news.audit(u.id, 'news.update', item.id, { title: item.title, publishAt: item.publishAt });
+    if (visibleNow(item) && !(before && visibleNow(before))) announce([item]);
+    return { item };
+  });
+
+  app.delete<{ Params: { id: string } }>('/api/admin/news/:id', adminLimit, async (req, reply) => {
+    const u = await requireRole(req, reply, ['admin']);
+    if (!u) return;
+    const item = await news.get(req.params.id, true);
+    if (!item || !(await news.remove(item.id))) return reply.code(404).send({ error: 'not_found' });
+    await news.audit(u.id, 'news.delete', item.id, { title: item.title });
+    return { ok: true };
+  });
+
+  // Items scheduled for later are announced when their time comes.
+  let newsCheckedAt = new Date();
+  const checkScheduled = async () => {
+    const since = newsCheckedAt;
+    newsCheckedAt = new Date();
+    announce(await news.publishedBetween(since));
+  };
+  const newsTimer = setInterval(() => void checkScheduled().catch((e) => app.log.error(e)), NEWS_CHECK_MS);
+  newsTimer.unref();
 
   // ---- Operators ----
 
@@ -985,6 +1085,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
 
   app.addHook('onClose', async () => {
     clearInterval(sweepTimer);
+    clearInterval(newsTimer);
     challenges.stop();
     gauge.stop();
     games.stop();

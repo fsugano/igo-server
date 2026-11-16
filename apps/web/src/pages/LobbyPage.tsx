@@ -7,6 +7,7 @@ import { useAuth } from '../auth';
 import { BotBadge } from '../components/BotBadge';
 import { CLOCK_PRESETS, GameForm, colorLabel, rulesLabel, sizeLabel } from '../components/GameForm';
 import { Modal } from '../components/Modal';
+import { NewsBanner } from './NewsPage';
 import { Avatar, LevelBadge, UserName } from '../components/UserBits';
 import { useSocial } from '../social';
 import { call, getSocket } from '../socket';
@@ -86,6 +87,7 @@ export function LobbyPage() {
 
   return (
     <div className="lobby">
+      <NewsBanner />
       <section className="card">
         <div className="tabs lobby-tabs" role="tablist">
           {(
