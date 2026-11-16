@@ -8,7 +8,6 @@ const scrypt = promisify(scryptCb) as (pw: string, salt: Buffer, len: number) =>
 export interface UserRow {
   id: string;
   username: string;
-  password_hash: string;
   rating: number;
   games_played: number;
   plan: string;
@@ -18,6 +17,18 @@ export interface UserRow {
   /** Consents to appearing by name in videos the operators publish. */
   allow_recording: boolean;
 }
+
+/**
+ * Columns read for a user. The password hash is left out: it is read only when checking a password (Users.credentials),
+ * so it cannot slip into a reply by mistake.
+ */
+export const USER_COLUMNS = 'id, username, rating, games_played, plan, bot, role, allow_recording';
+
+/** A user's row as JSON for joins (e.g. `${userJson('b')} AS b`), without the password hash. */
+export const userJson = (alias: string) =>
+  `json_build_object(${USER_COLUMNS.split(', ')
+    .map((c) => `'${c}', ${alias}.${c}`)
+    .join(', ')})`;
 
 export function toPublicUser(u: UserRow): PublicUser {
   return {
@@ -58,7 +69,7 @@ export class Users {
     const hash = await hashPassword(password);
     const r = await this.db.query<UserRow>(
       `INSERT INTO users (username, password_hash, rating) VALUES ($1, $2, $3)
-       ON CONFLICT DO NOTHING RETURNING *`,
+       ON CONFLICT DO NOTHING RETURNING ${USER_COLUMNS}`,
       [username, hash, rating],
     );
     return r.rows[0] ?? 'taken';
@@ -69,19 +80,31 @@ export class Users {
     const r = await this.db.query<UserRow>(
       `INSERT INTO users (username, password_hash, rating, bot) VALUES ($1, '!', $2, $3)
        ON CONFLICT (lower(username)) DO UPDATE SET bot = EXCLUDED.bot, rating = EXCLUDED.rating, password_hash = '!'
-       RETURNING *`,
+       RETURNING ${USER_COLUMNS}`,
       [username, rating, engineId],
     );
     return r.rows[0];
   }
 
   async byName(username: string): Promise<UserRow | null> {
-    const r = await this.db.query<UserRow>('SELECT * FROM users WHERE lower(username) = lower($1)', [username]);
+    const r = await this.db.query<UserRow>(`SELECT ${USER_COLUMNS} FROM users WHERE lower(username) = lower($1)`, [username]);
     return r.rows[0] ?? null;
   }
 
+  /** The user and their password hash, for checking a login. */
+  async credentials(username: string): Promise<{ user: UserRow; passwordHash: string } | null> {
+    const r = await this.db.query<UserRow & { password_hash: string }>(
+      `SELECT ${USER_COLUMNS}, password_hash FROM users WHERE lower(username) = lower($1)`,
+      [username],
+    );
+    const row = r.rows[0];
+    if (!row) return null;
+    const { password_hash, ...user } = row;
+    return { user, passwordHash: password_hash };
+  }
+
   async byId(id: string): Promise<UserRow | null> {
-    const r = await this.db.query<UserRow>('SELECT * FROM users WHERE id = $1', [id]);
+    const r = await this.db.query<UserRow>(`SELECT ${USER_COLUMNS} FROM users WHERE id = $1`, [id]);
     return r.rows[0] ?? null;
   }
 
@@ -97,7 +120,7 @@ export class Users {
   async bySession(token: string | undefined): Promise<UserRow | null> {
     if (!token) return null;
     const r = await this.db.query<UserRow>(
-      `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
+      `SELECT ${USER_COLUMNS.split(', ').map((c) => `u.${c}`).join(', ')} FROM sessions s JOIN users u ON u.id = s.user_id
        WHERE s.token_hash = $1 AND s.expires_at > now()`,
       [hashToken(token)],
     );
@@ -105,7 +128,7 @@ export class Users {
   }
 
   async setRole(username: string, role: Role): Promise<UserRow | null> {
-    const r = await this.db.query<UserRow>('UPDATE users SET role = $2 WHERE lower(username) = lower($1) AND bot IS NULL RETURNING *', [
+    const r = await this.db.query<UserRow>(`UPDATE users SET role = $2 WHERE lower(username) = lower($1) AND bot IS NULL RETURNING ${USER_COLUMNS}`, [
       username,
       role,
     ]);
@@ -114,6 +137,12 @@ export class Users {
 
   async setAllowRecording(id: string, allow: boolean): Promise<void> {
     await this.db.query('UPDATE users SET allow_recording = $2 WHERE id = $1', [id, allow]);
+  }
+
+  /** Removes expired sessions. Returns how many were removed. */
+  async deleteExpiredSessions(): Promise<number> {
+    const r = await this.db.query('DELETE FROM sessions WHERE expires_at <= now()');
+    return r.rowCount ?? 0;
   }
 
   async deleteSession(token: string): Promise<void> {

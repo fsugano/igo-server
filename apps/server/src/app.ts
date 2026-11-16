@@ -1,5 +1,6 @@
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
+import helmet from '@fastify/helmet';
 import fastifyStatic from '@fastify/static';
 import {
   Ack,
@@ -31,7 +32,7 @@ import { BotOptions, GameService, LiveGame, buildSgf, copyGame } from './games.j
 import { Lobby, aiGameSchema, validHandicap } from './lobby.js';
 import { Settings } from './settings.js';
 import { EventLimiter, originAllowed } from './socket-guard.js';
-import { UserRow, Users, dummyHash, toPublicUser, verifyPassword } from './users.js';
+import { UserRow, Users, dummyHash, toPublicUser, userJson, verifyPassword } from './users.js';
 
 const SESSION_COOKIE = 'sid';
 /** Finished games the record and style are computed from (the latest ones). */
@@ -50,6 +51,10 @@ type IoSocket = Socket<ClientToServerEvents, ServerToClientEvents, {}, { user: P
 /** Games between two engines use CPU while nobody plays: keep them few. */
 const MAX_AI_ONLY_GAMES = 4;
 const MAX_AI_ONLY_GAMES_PER_USER = 1;
+/** People playing the computer at once (each game keeps a CPU core busy while the computer thinks). */
+const MAX_PERSON_AI_GAMES = Number(process.env.AI_MAX_GAMES ?? 20);
+/** How often expired sessions are removed. */
+const SESSION_SWEEP_MS = 60 * 60 * 1000;
 
 export interface AppOptions extends Omit<BotOptions, 'engines'> {
   /** Computer players. Default: the built-in levels plus AI_GTP_ENGINES. */
@@ -67,6 +72,25 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     trustProxy: config.trustProxy as boolean | string,
   });
   await app.register(cookie);
+  await app.register(helmet, {
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        // React sets style attributes (board size, gauge width).
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:', 'blob:'],
+        mediaSrc: ["'self'", 'blob:'],
+        connectSrc: ["'self'", 'ws:', 'wss:'],
+        frameAncestors: ["'none'"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+      },
+    },
+    // Recorded videos are made from this same tab; nothing is embedded from other sites.
+    crossOriginEmbedderPolicy: false,
+  });
   await app.register(rateLimit, { global: false });
 
   const users = new Users(db);
@@ -219,9 +243,10 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
   app.post('/api/auth/login', authLimit, async (req, reply) => {
     const p = loginSchema.safeParse(req.body);
     if (!p.success) return reply.code(400).send({ error: 'invalid_input' });
-    const u = await users.byName(p.data.username);
+    const cred = await users.credentials(p.data.username);
     // Check a password even for unknown names, so the response time does not tell which names exist.
-    const ok = await verifyPassword(p.data.password, u?.password_hash ?? (await dummyHash()));
+    const ok = await verifyPassword(p.data.password, cred?.passwordHash ?? (await dummyHash()));
+    const u = cred?.user;
     if (!u || !ok) {
       return reply.code(401).send({ error: 'bad_credentials' });
     }
@@ -343,7 +368,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
   app.get<{ Params: { id: string } }>('/api/games/:id', async (req, reply) => {
     if (!/^\d+$/.test(req.params.id)) return reply.code(404).send({ error: 'not_found' });
     const r = await db.query(
-      `SELECT g.*, row_to_json(b) AS b, row_to_json(w) AS w FROM games g
+      `SELECT g.*, ${userJson('b')} AS b, ${userJson('w')} AS w FROM games g
        JOIN users b ON b.id = g.black_id JOIN users w ON w.id = g.white_id WHERE g.id = $1`,
       [req.params.id],
     );
@@ -478,20 +503,32 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     socket.on('seek:accept', safe(async (seekId, ack) => {
       const u = needUser(ack);
       if (!u) return;
-      if (userInGame(u.id)) return ack({ ok: false, error: 'already_playing' });
+      if (userInGame(u.id) || starting.has(u.id)) return ack({ ok: false, error: 'already_playing' });
+      const wanted = lobby.seeks.get(String(seekId));
+      if (wanted && starting.has(wanted.creator.id)) return ack({ ok: false, error: 'already_playing' });
       const s = lobby.takeSeek(u.id, String(seekId));
       if (typeof s === 'string') return ack({ ok: false, error: s });
-      const [creator, accepter] = await Promise.all([users.byId(s.creator.id), users.byId(u.id)]);
-      if (!creator || !accepter) return ack({ ok: false, error: 'no_such_user' });
-      const creatorBlack = s.color === 'black' || (s.color === 'random' && Math.random() < 0.5);
-      const settings: GameSettings = { size: s.size, komi: s.komi, handicap: s.handicap, ruleset: s.ruleset };
-      const g = await games.create({
-        black: creatorBlack ? creator : accepter,
-        white: creatorBlack ? accepter : creator,
-        settings,
-        clock: s.clock,
-        rated: s.rated,
-      });
+      // Hold both players until their game exists, so a second accept cannot start another game for either.
+      const held = [u.id, s.creator.id];
+      held.forEach((id) => starting.add(id));
+      let g: LiveGame;
+      try {
+        const [creator, accepter] = await Promise.all([users.byId(s.creator.id), users.byId(u.id)]);
+        if (!creator || !accepter) return ack({ ok: false, error: 'no_such_user' });
+        const creatorBlack = s.color === 'black' || (s.color === 'random' && Math.random() < 0.5);
+        const settings: GameSettings = { size: s.size, komi: s.komi, handicap: s.handicap, ruleset: s.ruleset };
+        g = await games.create({
+          black: creatorBlack ? creator : accepter,
+          white: creatorBlack ? accepter : creator,
+          settings,
+          clock: s.clock,
+          rated: s.rated,
+        });
+      } finally {
+        held.forEach((id) => starting.delete(id));
+      }
+      const creator = s.creator;
+      const accepter = u;
       // A player in a game should not have other open seeks.
       for (const [id, other] of lobby.seeks) {
         if (other.creator.id === creator.id || other.creator.id === accepter.id) lobby.seeks.delete(id);
@@ -512,7 +549,11 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       const people = [r.black, r.white].filter((x) => x === null).length;
       if (people === 2) return ack({ ok: false, error: 'invalid_seek' });
       for (const id of [r.black, r.white]) if (id !== null && !botUsers.has(id)) return ack({ ok: false, error: 'no_such_engine' });
-      if (people === 1 && userInGame(u.id)) return ack({ ok: false, error: 'already_playing' });
+      if (people === 1 && (userInGame(u.id) || starting.has(u.id))) return ack({ ok: false, error: 'already_playing' });
+      if (people === 1) {
+        const withPerson = [...games.live.values()].filter((g) => !games.isAiOnly(g) && (g.black.bot || g.white.bot));
+        if (withPerson.length >= MAX_PERSON_AI_GAMES) return ack({ ok: false, error: 'server_busy' });
+      }
       if (people === 0) {
         const aiOnly = [...games.live.values()].filter((g) => games.isAiOnly(g));
         if (aiOnly.filter((g) => g.owner === u.id).length >= MAX_AI_ONLY_GAMES_PER_USER) {
@@ -520,17 +561,23 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
         }
         if (aiOnly.length >= MAX_AI_ONLY_GAMES) return ack({ ok: false, error: 'server_busy' });
       }
-      const me = await users.byId(u.id);
-      if (!me) return ack({ ok: false, error: 'no_such_user' });
-      const side = (id: string | null) => (id === null ? me : botUsers.get(id)!);
-      const g = await games.create({
-        black: side(r.black),
-        white: side(r.white),
-        settings: { size: r.size, komi: r.komi, handicap: r.handicap, ruleset: r.ruleset },
-        clock: r.clock,
-        rated: false,
-        owner: people === 0 ? u.id : undefined,
-      });
+      if (people === 1) starting.add(u.id);
+      let g: LiveGame;
+      try {
+        const me = await users.byId(u.id);
+        if (!me) return ack({ ok: false, error: 'no_such_user' });
+        const side = (id: string | null) => (id === null ? me : botUsers.get(id)!);
+        g = await games.create({
+          black: side(r.black),
+          white: side(r.white),
+          settings: { size: r.size, komi: r.komi, handicap: r.handicap, ruleset: r.ruleset },
+          clock: r.clock,
+          rated: false,
+          owner: people === 0 ? u.id : undefined,
+        });
+      } finally {
+        if (people === 1) starting.delete(u.id);
+      }
       if (people === 1) {
         for (const [id, s] of lobby.seeks) if (s.creator.id === u.id) lobby.seeks.delete(id);
         botSay(g.id, r.black ? g.black : g.white, LINES.greeting);
@@ -634,12 +681,22 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     }
   }
 
+  /** People whose game is being created right now (between the checks and the game existing). */
+  const starting = new Set<string>();
+
+  // Expired sessions would otherwise pile up in the table.
+  const sweep = () => void users.deleteExpiredSessions().catch((e) => app.log.error(e));
+  sweep();
+  const sweepTimer = setInterval(sweep, SESSION_SWEEP_MS);
+  sweepTimer.unref();
+
   function userInGame(userId: string): LiveGame | undefined {
     for (const g of games.live.values()) if (g.black.id === userId || g.white.id === userId) return g;
     return undefined;
   }
 
   app.addHook('onClose', async () => {
+    clearInterval(sweepTimer);
     gauge.stop();
     games.stop();
     io.close();

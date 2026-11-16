@@ -344,4 +344,34 @@ describe('protection', () => {
     expect(res.status).toBe(401);
     expect((await res.json()).error).toBe('bad_credentials');
   });
+
+  it('sends security headers', async () => {
+    const res = await fetch(`${base}/api/health`);
+    expect(res.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+  });
+
+  it('starts only one game when the same person accepts two seeks at once', async () => {
+    const login = async (username: string) => {
+      const res = await fetch(`${base}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username, password: 'password123' }),
+      });
+      expect(res.status).toBe(200);
+      return res.headers.get('set-cookie')!.split(';')[0];
+    };
+    // Players from earlier tests whose games have ended.
+    const sa = await connect(await login('quitter'));
+    const sb = await connect(await login('winner'));
+    const one = await emit(sa, 'seek:create', seek);
+    const two = await emit(sa, 'seek:create', { ...seek, size: 13 });
+    expect(one.ok && two.ok).toBe(true);
+    const results = await Promise.all([emit(sb, 'seek:accept', one.seek.id), emit(sb, 'seek:accept', two.seek.id)]);
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(results.find((r) => !r.ok)?.error).toBe('already_playing');
+    const started = results.find((r) => r.ok)!;
+    await emit(sa, 'game:join', started.gameId);
+    expect((await emit(sa, 'game:resign', started.gameId)).ok).toBe(true);
+  });
 });

@@ -1,3 +1,5 @@
+import { resolve } from 'node:path';
+
 export interface Config {
   port: number;
   host: string;
@@ -24,7 +26,8 @@ export function loadConfig(env = process.env): Config {
     port: Number(env.PORT ?? 3000),
     host: env.HOST ?? '127.0.0.1',
     databaseUrl: env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/igo',
-    webDist: env.WEB_DIST ?? null,
+    // @fastify/static needs an absolute path.
+    webDist: env.WEB_DIST ? resolve(env.WEB_DIST) : null,
     secureCookies: production,
     sessionDays: Number(env.SESSION_DAYS ?? 30),
     trustProxy: parseTrustProxy(env.TRUST_PROXY),

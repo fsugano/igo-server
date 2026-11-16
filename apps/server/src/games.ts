@@ -22,7 +22,7 @@ import {
 } from '@igo/shared';
 import type { Engine, EngineMove } from './ai/index.js';
 import type { Db } from './db.js';
-import { UserRow, toPublicUser } from './users.js';
+import { USER_COLUMNS, UserRow, toPublicUser, userJson } from './users.js';
 
 export interface LiveGame {
   id: string;
@@ -104,7 +104,7 @@ export class GameService {
   /** Restores active games after a restart. The player to move gets a fresh turn start. */
   async loadActive(): Promise<number> {
     const r = await this.db.query(
-      `SELECT g.*, row_to_json(b) AS b, row_to_json(w) AS w FROM games g
+      `SELECT g.*, ${userJson('b')} AS b, ${userJson('w')} AS w FROM games g
        JOIN users b ON b.id = g.black_id JOIN users w ON w.id = g.white_id
        WHERE g.status = 'active'`,
     );
@@ -398,7 +398,7 @@ export class GameService {
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
-      const users = await client.query<UserRow>('SELECT * FROM users WHERE id = ANY($1) FOR UPDATE', [[g.black.id, g.white.id]]);
+      const users = await client.query<UserRow>(`SELECT ${USER_COLUMNS} FROM users WHERE id = ANY($1) FOR UPDATE`, [[g.black.id, g.white.id]]);
       const b = users.rows.find((u) => String(u.id) === g.black.id)!;
       const w = users.rows.find((u) => String(u.id) === g.white.id)!;
       // Games with fewer than two moves each are not rated (aborted / disconnected starts).
