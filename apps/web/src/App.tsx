@@ -1,7 +1,12 @@
 import { canBroadcast } from '@igo/shared';
-import { useEffect } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from './auth';
+import { MessagesPage } from './pages/MessagesPage';
+import { useSocial } from './social';
+import { ChallengeCenter } from './components/ChallengeCenter';
+import { Avatar } from './components/UserBits';
+import { SettingsPage } from './pages/SettingsPage';
 import { AdminPage } from './pages/AdminPage';
 import { BroadcastPage } from './pages/BroadcastPage';
 import { GamePage } from './pages/GamePage';
@@ -9,9 +14,15 @@ import { LobbyPage } from './pages/LobbyPage';
 import { LoginPage } from './pages/LoginPage';
 import { ProfilePage } from './pages/ProfilePage';
 import { getSocket } from './socket';
+import { UpdateNotice } from './pwa';
+import { api } from './api';
+import { NewsPage } from './pages/NewsPage';
+import { AdminNewsPage } from './pages/AdminNewsPage';
+import { AdminReportsPage } from './pages/AdminReportsPage';
 
 export function App() {
   const { user, account, logout } = useAuth();
+  const { unread } = useSocial();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -24,6 +35,32 @@ export function App() {
       s.off('game:start', onStart);
     };
   }, [navigate]);
+
+  // Unread news: counted by the server on load, then one more for each item announced.
+  const [newsUnread, setNewsUnread] = useState(0);
+  const announced = useRef(new Set<string>());
+  useEffect(() => {
+    if (!user) return setNewsUnread(0);
+    // The list marks everything read when it opens.
+    if (window.location.pathname === '/news') return;
+    api.newsUnread().then((r) => setNewsUnread(r.count), () => {});
+  }, [user?.id]);
+  useEffect(() => {
+    const s = getSocket();
+    const onNews = (n: { id: string }) => {
+      if (announced.current.has(n.id)) return;
+      announced.current.add(n.id);
+      setNewsUnread((c) => c + 1);
+    };
+    s.on('news:published', onNews);
+    return () => {
+      s.off('news:published', onNews);
+    };
+  }, []);
+  const readNews = useCallback(() => {
+    setNewsUnread(0);
+    if (user) void api.newsRead().catch(() => {});
+  }, [user?.id]);
 
   // The recording mode fills the window with nothing around it.
   if (location.pathname.startsWith('/admin/broadcast/')) {
@@ -45,15 +82,24 @@ export function App() {
           {user ? (
             <>
               {canBroadcast(account?.role) && <Link to="/admin">運営</Link>}
+              <Link to="/news">
+                お知らせ{newsUnread > 0 && <span className="count" aria-label={`未読${newsUnread}件`}>{newsUnread}</span>}
+              </Link>
+              <Link to="/messages" className="messages-link">
+                メッセージ{unread > 0 && <span className="count" aria-label={`未読${unread}件`}>{unread}</span>}
+              </Link>
               <Link to={`/u/${user.username}`} className="me">
-                {user.username} <span className="rank">{user.rank}</span>
+                <Avatar u={user} size={24} /> {user.displayName} <span className="rank">{user.rank}</span>
               </Link>
               <button className="link" onClick={() => void logout()}>
                 ログアウト
               </button>
             </>
           ) : (
-            <Link to="/login">ログイン / 新規登録</Link>
+            <>
+              <Link to="/news">お知らせ</Link>
+              <Link to="/login">ログイン / 新規登録</Link>
+            </>
           )}
         </nav>
       </header>
@@ -64,9 +110,18 @@ export function App() {
           <Route path="/game/:id" element={<GamePage />} />
           <Route path="/u/:username" element={<ProfilePage />} />
           <Route path="/admin" element={<AdminPage />} />
+          <Route path="/messages" element={<MessagesPage />} />
+          <Route path="/settings/profile" element={<SettingsPage />} />
+          <Route path="/news" element={<NewsPage onOpenList={readNews} />} />
+          <Route path="/news/:id" element={<NewsPage />} />
+          <Route path="/admin/news" element={<AdminNewsPage />} />
+          <Route path="/admin/reports" element={<AdminReportsPage />} />
+          <Route path="/messages/:userId" element={<MessagesPage />} />
           <Route path="*" element={<p className="empty">ページが見つかりません</p>} />
         </Routes>
       </main>
+      <ChallengeCenter />
+      <UpdateNotice />
     </div>
   );
 }

@@ -14,6 +14,7 @@ export default defineConfig({
     proxy: {
       '/api': api,
       '/socket.io': { target: api, ws: true },
+      '/avatars': api,
     },
   },
 });

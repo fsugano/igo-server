@@ -12,6 +12,12 @@ export interface PublicUser {
   premium: boolean;
   /** A computer player. */
   bot: boolean;
+  /** Nickname shown first; the username when none is set. */
+  displayName: string;
+  /** 256×256 WebP, or null for the default picture. The 64×64 one is at the same path with -64 instead of -256. */
+  avatarUrl: string | null;
+  /** How much the person has played (not how strong they are). */
+  level: number;
 }
 
 export interface SeekRequest {
@@ -84,17 +90,149 @@ export interface GameView {
   ratingChange?: { black: number; white: number } | null;
 }
 
+/** What someone in the online list is doing. */
+export type PresenceStatus = 'available' | 'playing' | 'playing_ai' | 'busy';
+
+export interface OnlineUser extends PublicUser {
+  status: PresenceStatus;
+  /** The game being played, for "watch". */
+  gameId?: string;
+}
+
 export interface LobbyState {
   seeks: Seek[];
   games: GameSummary[];
-  online: PublicUser[];
+  online: OnlineUser[];
+}
+
+/** A game offered to one particular person. The colour is from the challenger's side. */
+export type ChallengeRequest = SeekRequest;
+
+export interface Challenge {
+  id: string;
+  from: PublicUser;
+  to: PublicUser;
+  request: ChallengeRequest;
+  /** Server time (ms) when it lapses. */
+  expiresAt: number;
+  /** Set on a counter-offer: the challenge it answers. A counter-offer cannot be countered again. */
+  counterOf?: string;
+}
+
+export type ChallengeOutcome = 'accepted' | 'declined' | 'expired' | 'cancelled' | 'countered';
+
+export interface ChallengeUpdate {
+  id: string;
+  outcome: ChallengeOutcome;
+  /** Set phrase given when declining. */
+  reason?: string;
+  gameId?: string;
+  /** The counter-offer that replaced it. */
+  counter?: Challenge;
+}
+
+/** Set phrases for declining (free text is not allowed, so nothing rude can be sent this way). */
+export const DECLINE_REASONS = ['今は打てません', '持ち時間が合いません', '盤の大きさが合いません', 'また今度お願いします'] as const;
+
+export interface LobbyChatMessage {
+  id: string;
+  user: PublicUser;
+  text: string;
+  at: number;
+}
+
+export interface DirectMessage {
+  id: string;
+  fromId: string;
+  toId: string;
+  text: string;
+  at: number;
+  /** When the recipient opened it, null while unread. */
+  readAt: number | null;
+}
+
+/** One person I have messages with, for the list of conversations. */
+export interface Conversation {
+  user: PublicUser;
+  last: DirectMessage;
+  unread: number;
+}
+
+export type NewsCategory = 'info' | 'maintenance' | 'update' | 'event';
+export const NEWS_CATEGORIES: Record<NewsCategory, string> = {
+  info: 'お知らせ',
+  maintenance: 'メンテナンス',
+  update: 'アップデート',
+  event: 'イベント',
+};
+
+export interface NewsItem {
+  id: string;
+  title: string;
+  /** Markdown (raw HTML is not rendered). */
+  body: string;
+  category: NewsCategory;
+  important: boolean;
+  pinned: boolean;
+  /** null while a draft. */
+  publishAt: number | null;
+  expireAt: number | null;
+}
+
+export type ReportTarget = 'user' | 'avatar' | 'lobbychat' | 'dm';
+export const REPORT_REASONS = {
+  spam: '迷惑な宣伝・連投',
+  harassment: '嫌がらせ・暴言',
+  inappropriate: '不適切な名前・画像・内容',
+  cheating: '不正（AI の使用など）',
+  other: 'その他',
+} as const;
+export type ReportReason = keyof typeof REPORT_REASONS;
+
+export interface Report {
+  id: string;
+  targetType: ReportTarget;
+  targetId: string;
+  targetUser: PublicUser | null;
+  reporter: PublicUser | null;
+  reason: ReportReason;
+  detail: string | null;
+  /** The reported text as it was. */
+  snapshot: string | null;
+  status: 'open' | 'resolved' | 'dismissed';
+  action: string | null;
+  at: number;
 }
 
 export type Ack<T = {}> = (res: ({ ok: true } & T) | { ok: false; error: string }) => void;
 
 export interface ClientToServerEvents {
-  'lobby:join': (ack: Ack<{ lobby: LobbyState }>) => void;
+  /** The chat history comes only to logged-in users. */
+  'lobby:join': (ack: Ack<{ lobby: LobbyState; chat: LobbyChatMessage[] }>) => void;
+  'lobbychat:send': (text: string, ack: Ack) => void;
+  'presence:setStatus': (status: 'available' | 'busy', ack: Ack) => void;
+  'challenge:create': (userId: string, req: ChallengeRequest, ack: Ack<{ challenge: Challenge }>) => void;
+  'challenge:respond': (
+    challengeId: string,
+    answer: 'accept' | 'decline' | 'counter',
+    detail: { reason?: string; request?: ChallengeRequest },
+    ack: Ack<{ gameId?: string; challenge?: Challenge }>,
+  ) => void;
+  'challenge:cancel': (challengeId: string, ack: Ack) => void;
+  /** Challenges to and from me still open (e.g. after reloading the page). */
+  'challenge:list': (ack: Ack<{ challenges: Challenge[] }>) => void;
   'lobby:leave': () => void;
+  /** People I follow (their ids). */
+  'follow:list': (ack: Ack<{ ids: string[] }>) => void;
+  'follow:set': (userId: string, follow: boolean, ack: Ack) => void;
+  /** People I have blocked. */
+  'block:list': (ack: Ack<{ ids: string[] }>) => void;
+  'block:set': (userId: string, block: boolean, ack: Ack) => void;
+  'dm:conversations': (ack: Ack<{ conversations: Conversation[] }>) => void;
+  /** The latest messages with this person, oldest first. Marks the ones to me as read. */
+  'dm:history': (userId: string, ack: Ack<{ user: PublicUser; messages: DirectMessage[] }>) => void;
+  'dm:send': (userId: string, text: string, ack: Ack<{ message: DirectMessage }>) => void;
+  'dm:read': (userId: string, ack: Ack) => void;
   'seek:create': (req: SeekRequest, ack: Ack<{ seek: Seek }>) => void;
   'seek:cancel': (seekId: string, ack: Ack) => void;
   'seek:accept': (seekId: string, ack: Ack<{ gameId: string }>) => void;
@@ -116,6 +254,15 @@ export interface ClientToServerEvents {
 
 export interface ServerToClientEvents {
   'lobby:state': (lobby: LobbyState) => void;
+  'lobbychat:message': (msg: LobbyChatMessage) => void;
+  'challenge:received': (challenge: Challenge) => void;
+  'challenge:updated': (update: ChallengeUpdate) => void;
+  /** A message to or from me (sent to all my tabs). */
+  'dm:message': (msg: DirectMessage, from: PublicUser) => void;
+  /** My own details changed (rating, level after a game). */
+  'user:updated': (user: PublicUser) => void;
+  /** A news item has just become visible (the body is fetched when opened). */
+  'news:published': (item: Omit<NewsItem, 'body'>) => void;
   'game:start': (gameId: string) => void;
   'game:update': (game: GameView) => void;
   'game:chat': (gameId: string, msg: ChatMessage) => void;

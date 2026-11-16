@@ -1,16 +1,22 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ProfileGame, api, errorText } from '../api';
+import { api, errorText } from '../api';
 import { useAuth } from '../auth';
 import { PlayerStats } from '../components/PlayerStats';
+import { Avatar, LevelBadge } from '../components/UserBits';
+import { useSocial } from '../social';
+import { ReportDialog } from '../components/ReportDialog';
+import { declaredRankLabel } from '@igo/shared';
 import { resultText } from './GamePage';
-import type { PublicUser } from '@igo/shared';
 
 export function ProfilePage() {
   const { username = '' } = useParams();
-  const [data, setData] = useState<{ user: PublicUser; games: ProfileGame[] } | null>(null);
+  const [data, setData] = useState<Awaited<ReturnType<typeof api.profile>> | null>(null);
   const [missing, setMissing] = useState(false);
   const { user: me } = useAuth();
+  const { following, setFollow, blocked, setBlock } = useSocial();
+  const [reporting, setReporting] = useState<'user' | 'avatar' | null>(null);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     setData(null);
@@ -19,7 +25,15 @@ export function ProfilePage() {
 
   if (missing) return <p className="empty">ユーザーが見つかりません</p>;
   if (!data) return <p className="empty">読み込み中…</p>;
-  const { user, games } = data;
+  const { user, games, follows } = data;
+  const isFollowing = following.has(user.id);
+  const toggleFollow = async () => {
+    setError('');
+    const e = await setFollow(user.id, !isFollowing);
+    if (e) return setError(errorText(e));
+    // The follower count changed: count it here rather than fetching the profile again.
+    setData({ ...data, follows: { ...follows, followers: follows.followers + (isFollowing ? -1 : 1) } });
+  };
   const mine = me?.id === user.id;
   const finished = games.filter((g) => g.status === 'finished');
   const wins = finished.filter(
@@ -28,13 +42,60 @@ export function ProfilePage() {
 
   return (
     <div className="card">
-      <h2>
-        {user.username} <span className="rank">{user.rank}</span>
-        {user.premium && <span className="badge">プレミアム</span>}
-      </h2>
-      <p className="meta">
-        レーティング {user.rating} · レート対局 {user.gamesPlayed}局 · 直近{finished.length}局で{wins}勝
-      </p>
+      <div className="profile-head">
+        <Avatar u={user} size={88} />
+        <div>
+          <h2>
+            {user.displayName}
+            {user.displayName !== user.username && <span className="handle"> @{user.username}</span>} <span className="rank">{user.rank}</span>
+            {!user.bot && <LevelBadge level={user.level} />}
+            {user.premium && <span className="badge">プレミアム</span>}
+          </h2>
+          <p className="meta">
+            レーティング {user.rating} · レート対局 {user.gamesPlayed}局 · 直近{finished.length}局で{wins}勝
+            {!user.bot && ` · 終局まで打った対局 ${data.gamesCompleted}局`}
+            {data.declaredRank && declaredRankLabel(data.declaredRank) !== user.rank && ` · 申告棋力 ${declaredRankLabel(data.declaredRank)}`}
+          </p>
+          {mine && (
+            <Link className="button" to="/settings/profile">
+              プロフィールを編集
+            </Link>
+          )}
+        </div>
+      </div>
+      {!user.bot && (
+        <p className="meta">
+          フォロー {follows.following} · フォロワー {follows.followers}
+        </p>
+      )}
+      {me && !mine && !user.bot && (
+        <div className="buttons">
+          <button onClick={() => void toggleFollow()}>{isFollowing ? 'フォロー中' : 'フォローする'}</button>
+          <Link className="button" to={`/messages/${user.id}`}>
+            メッセージを送る
+          </Link>
+          <button
+            className="link"
+            onClick={() => {
+              const block = !blocked.has(user.id);
+              if (block && !window.confirm(`${user.displayName}さんをブロックしますか？ 対局の申し込みやメッセージが届かなくなります。`)) return;
+              void setBlock(user.id, block).then((e) => e && setError(errorText(e)));
+            }}
+          >
+            {blocked.has(user.id) ? 'ブロックを解除' : 'ブロックする'}
+          </button>
+          <button className="link danger" onClick={() => setReporting('user')}>
+            通報する
+          </button>
+          {user.avatarUrl && (
+            <button className="link danger" onClick={() => setReporting('avatar')}>
+              画像を通報する
+            </button>
+          )}
+        </div>
+      )}
+      {reporting && <ReportDialog type={reporting} id={user.id} onClose={() => setReporting(null)} />}
+      {error && <p className="error">{error}</p>}
       {mine && <RecordingConsent />}
       <PlayerStats username={user.username} />
       <h3>対局履歴</h3>

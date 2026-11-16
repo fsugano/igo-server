@@ -1,0 +1,17 @@
+{
+  "name": "囲碁対局場",
+  "short_name": "囲碁対局場",
+  "description": "オンラインで囲碁を打つ・観る",
+  "lang": "ja",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f4f1ea",
+  "theme_color": "#8a3b12",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

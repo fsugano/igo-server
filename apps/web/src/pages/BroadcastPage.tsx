@@ -45,7 +45,7 @@ function Broadcast({ id }: { id: string }) {
   const { gauge, error: gaugeError } = useGauge(id, showGauge);
   // Players who have not agreed to appear by name are only called Black and White.
   const narrationNames = view && info
-    ? { black: info.consent.black ? view.black.username : '', white: info.consent.white ? view.white.username : '' }
+    ? { black: info.consent.black ? view.black.displayName : '', white: info.consent.white ? view.white.displayName : '' }
     : null;
   const { intro: sayIntro } = useNarration({ view, names: narrationNames, gauge: showGauge ? gauge : null, lang: narration });
 
@@ -151,7 +151,7 @@ function Broadcast({ id }: { id: string }) {
   const st = view.state;
   const elapsed = view.turnStartedAt === null ? 0 : now - offset - view.turnStartedAt;
   const last = st.moves.at(-1);
-  const shownName = (u: PublicUser, c: Stone) => (info.consent[c === BLACK ? 'black' : 'white'] ? u.username : c === BLACK ? '黒' : '白');
+  const shownName = (u: PublicUser, c: Stone) => (info.consent[c === BLACK ? 'black' : 'white'] ? u.displayName : c === BLACK ? '黒' : '白');
   // Without cropping, the whole tab is in the video: keep the controls out of it while recording.
   const hideToolbar = !!rec && !rec.cropped;
   const pixels = Math.round(STAGE_H * scale * window.devicePixelRatio);

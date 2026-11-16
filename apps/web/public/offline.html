@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>接続されていません - 囲碁対局場</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: system-ui, sans-serif; background: #f4f1ea; color: #2b2620; text-align: center; padding: 16px; box-sizing: border-box; }
+      @media (prefers-color-scheme: dark) { body { background: #1d1a16; color: #ece6da; } }
+      button { font: inherit; padding: 8px 18px; border-radius: 6px; border: 1px solid #8a3b12; background: #8a3b12; color: #fff; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <img src="/icons/icon-192.png" alt="" width="72" height="72" />
+      <h1>接続されていません</h1>
+      <p>インターネットにつながると、また使えるようになります。</p>
+      <button onclick="location.reload()">再読み込み</button>
+    </main>
+  </body>
+</html>

@@ -1,24 +1,18 @@
-import type { AiEngineInfo, AiGameRequest, ClockSettings, LobbyState, Seek, SeekRequest } from '@igo/shared';
+import type { AiEngineInfo, AiGameRequest, LobbyChatMessage, LobbyState, OnlineUser, PresenceStatus, Seek, SeekRequest } from '@igo/shared';
 import { describeClock } from '@igo/shared';
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, forwardRef, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { errorText } from '../api';
 import { useAuth } from '../auth';
 import { BotBadge } from '../components/BotBadge';
+import { CLOCK_PRESETS, GameForm, colorLabel, rulesLabel, sizeLabel } from '../components/GameForm';
+import { Modal } from '../components/Modal';
+import { ReportDialog } from '../components/ReportDialog';
+import { NewsBanner } from './NewsPage';
+import { Avatar, LevelBadge, UserName } from '../components/UserBits';
+import { useSocial } from '../social';
 import { call, getSocket } from '../socket';
 
-const CLOCK_PRESETS: { label: string; clock: ClockSettings }[] = [
-  { label: '早碁 5分 + 30秒×3', clock: { type: 'byoyomi', mainTime: 5 * 60_000, periods: 3, periodTime: 30_000 } },
-  { label: '10分 + 30秒×3', clock: { type: 'byoyomi', mainTime: 10 * 60_000, periods: 3, periodTime: 30_000 } },
-  { label: '20分 + 30秒×3', clock: { type: 'byoyomi', mainTime: 20 * 60_000, periods: 3, periodTime: 30_000 } },
-  { label: '40分 + 60秒×5', clock: { type: 'byoyomi', mainTime: 40 * 60_000, periods: 5, periodTime: 60_000 } },
-  { label: '秒読みのみ 30秒×5', clock: { type: 'byoyomi', mainTime: 0, periods: 5, periodTime: 30_000 } },
-  { label: 'フィッシャー 5分 + 10秒', clock: { type: 'fischer', mainTime: 5 * 60_000, increment: 10_000, maxTime: 10 * 60_000 } },
-];
-
-const sizeLabel = (n: number) => `${n}路`;
-const rulesLabel = (r: string) => (r === 'japanese' ? '日本ルール' : '中国ルール');
-const colorLabel = { black: '黒番', white: '白番', random: 'ニギリ' } as const;
 /** Byo-yomi only: a game between engines then never waits on a long main time. */
 const AI_VS_AI_PRESET = 4;
 
@@ -29,24 +23,43 @@ const MODES: { mode: Mode; label: string }[] = [
   { mode: 'ai-ai', label: 'AI対AI' },
 ];
 
+type Tab = 'online' | 'seeks' | 'games';
+const STATUS_LABEL: Record<PresenceStatus, string> = {
+  available: '対局できます',
+  playing: '対局中',
+  playing_ai: 'AIと対局中',
+  busy: '取り込み中',
+};
+const MAX_CHAT = 200;
+
 export function LobbyPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [lobby, setLobby] = useState<LobbyState | null>(null);
+  const [chat, setChat] = useState<LobbyChatMessage[]>([]);
   const [error, setError] = useState('');
+  const [tab, setTab] = useState<Tab>('online');
+  const [mode, setMode] = useState<Mode>('human');
+  const [sheet, setSheet] = useState<OnlineUser | null>(null);
+  const newGameRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     const s = getSocket();
     const join = () =>
-      void call<{ lobby: LobbyState }>('lobby:join').then((r) => {
-        if (r.ok) setLobby(r.lobby);
+      void call<{ lobby: LobbyState; chat: LobbyChatMessage[] }>('lobby:join').then((r) => {
+        if (!r.ok) return;
+        setLobby(r.lobby);
+        setChat(r.chat);
       });
+    const onChat = (m: LobbyChatMessage) => setChat((c) => [...c.slice(-(MAX_CHAT - 1)), m]);
     join();
     s.on('connect', join);
     s.on('lobby:state', setLobby);
+    s.on('lobbychat:message', onChat);
     return () => {
       s.off('connect', join);
       s.off('lobby:state', setLobby);
+      s.off('lobbychat:message', onChat);
       s.emit('lobby:leave');
     };
   }, []);
@@ -63,12 +76,33 @@ export function LobbyPage() {
     if (!r.ok) setError(errorText(r.error));
   };
 
+  const playAi = () => {
+    setMode('human-ai');
+    newGameRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
   const myGame = lobby?.games.find((g) => user && (g.black.id === user.id || g.white.id === user.id));
+  const me = lobby?.online.find((u) => u.id === user?.id);
+  // Keep the open sheet in step with the list (status changes, going offline).
+  const sheetUser = sheet && (lobby?.online.find((u) => u.id === sheet.id) ?? { ...sheet, status: 'busy' as const, offline: true });
 
   return (
     <div className="lobby">
+      <NewsBanner />
       <section className="card">
-        <h2>対局の申し込み</h2>
+        <div className="tabs lobby-tabs" role="tablist">
+          {(
+            [
+              ['online', `オンライン (${lobby?.online.length ?? 0})`],
+              ['seeks', `募集 (${lobby?.seeks.length ?? 0})`],
+              ['games', `対局中 (${lobby?.games.length ?? 0})`],
+            ] as const
+          ).map(([t, label]) => (
+            <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
+              {label}
+            </button>
+          ))}
+        </div>
         {myGame && (
           <p className="notice">
             対局中の碁があります。<Link to={`/game/${myGame.id}`}>対局に戻る</Link>
@@ -77,94 +111,351 @@ export function LobbyPage() {
         {error && <p className="error">{error}</p>}
         {!lobby ? (
           <p className="empty">読み込み中…</p>
-        ) : lobby.seeks.length === 0 ? (
-          <p className="empty">募集中の対局はありません。右のフォームから募集してみましょう。</p>
+        ) : tab === 'online' ? (
+          <OnlineList lobby={lobby} me={me} onOpen={setSheet} onPlayAi={playAi} onError={setError} />
+        ) : tab === 'seeks' ? (
+          <SeekList lobby={lobby} onAccept={accept} onCancel={cancel} />
         ) : (
-          <table className="list">
-            <thead>
-              <tr>
-                <th>募集者</th>
-                <th>条件</th>
-                <th>持ち時間</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {lobby.seeks.map((s) => (
-                <tr key={s.id}>
-                  <td>
-                    <Link to={`/u/${s.creator.username}`}>{s.creator.username}</Link>{' '}
-                    <span className="rank">{s.creator.rank}</span>
-                  </td>
-                  <td>
-                    {sizeLabel(s.size)} · {s.handicap ? `${s.handicap}子` : `コミ${s.komi}`} · {rulesLabel(s.ruleset)} ·{' '}
-                    {s.rated ? 'レート' : '自由'} · 募集者{colorLabel[s.color]}
-                  </td>
-                  <td>{describeClock(s.clock)}</td>
-                  <td className="actions">
-                    {user?.id === s.creator.id ? (
-                      <button onClick={() => void cancel(s)}>取り消す</button>
-                    ) : (
-                      <button className="primary" disabled={!user} onClick={() => void accept(s)}>
-                        対局する
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <GameList lobby={lobby} />
         )}
       </section>
 
       <aside className="side">
-        {user ? <NewGame onError={setError} /> : (
+        {user ? (
+          <NewGame ref={newGameRef} mode={mode} setMode={setMode} onError={setError} />
+        ) : (
           <section className="card">
             <p>
               対局するには<Link to="/login">ログインまたは新規登録</Link>してください。観戦はログインなしでもできます。
             </p>
           </section>
         )}
-        <section className="card">
-          <h2>対局中 ({lobby?.games.length ?? 0})</h2>
-          {lobby?.games.length ? (
-            <ul className="games">
-              {lobby.games.map((g) => (
-                <li key={g.id}>
-                  <Link to={`/game/${g.id}`}>
-                    ● {g.black.username} <span className="rank">{g.black.rank}</span>
-                    <BotBadge user={g.black} /> vs ○ {g.white.username} <span className="rank">{g.white.rank}</span>
-                    <BotBadge user={g.white} />
-                  </Link>
-                  <small>
-                    {sizeLabel(g.size)} · {g.moveCount}手
-                  </small>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="empty">今は対局がありません</p>
-          )}
-        </section>
-        <section className="card">
-          <h2>オンライン ({lobby?.online.length ?? 0})</h2>
-          <ul className="users">
-            {lobby?.online.map((u) => (
-              <li key={u.id}>
-                <Link to={`/u/${u.username}`}>{u.username}</Link> <span className="rank">{u.rank}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
+        <LobbyChat messages={chat} />
       </aside>
+
+      {sheetUser && <UserSheet u={sheetUser} offline={'offline' in sheetUser} onClose={() => setSheet(null)} />}
     </div>
   );
 }
 
-function NewGame({ onError }: { onError: (e: string) => void }) {
-  const [mode, setMode] = useState<Mode>('human');
+function OnlineList({
+  lobby,
+  me,
+  onOpen,
+  onPlayAi,
+  onError,
+}: {
+  lobby: LobbyState;
+  me: OnlineUser | undefined;
+  onOpen: (u: OnlineUser) => void;
+  onPlayAi: () => void;
+  onError: (e: string) => void;
+}) {
+  const { user } = useAuth();
+  const { following, blocked } = useSocial();
+  const [query, setQuery] = useState('');
+  const [onlyAvailable, setOnlyAvailable] = useState(false);
+  const [onlyFollowing, setOnlyFollowing] = useState(false);
+  const q = query.trim().toLowerCase();
+  const myRating = me?.rating ?? 0;
+  // People I follow first, then those free to play, then the closest in strength.
+  const rank = (u: OnlineUser) => [following.has(u.id) ? 0 : 1, u.status === 'available' ? 0 : 1, Math.abs(u.rating - myRating)];
+  const people = lobby.online
+    .filter(
+      (u) =>
+        (!q || u.username.toLowerCase().includes(q) || u.displayName.toLowerCase().includes(q)) &&
+        (!onlyAvailable || u.status === 'available') &&
+        (!onlyFollowing || following.has(u.id)) &&
+        !blocked.has(u.id),
+    )
+    .sort((a, b) => {
+      const ra = rank(a);
+      const rb = rank(b);
+      return ra[0] - rb[0] || ra[1] - rb[1] || ra[2] - rb[2];
+    });
+
+  const setBusy = async (busy: boolean) => {
+    const r = await call('presence:setStatus', busy ? 'busy' : 'available');
+    if (!r.ok) onError(errorText(r.error));
+  };
+
   return (
-    <section className="card">
+    <>
+      <div className="toolbar">
+        <input type="search" placeholder="名前で探す" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="名前で探す" />
+        <label className="check">
+          <input type="checkbox" checked={onlyAvailable} onChange={(e) => setOnlyAvailable(e.target.checked)} />
+          対局できる人だけ
+        </label>
+        {user && (
+          <label className="check">
+            <input type="checkbox" checked={onlyFollowing} onChange={(e) => setOnlyFollowing(e.target.checked)} />
+            フォロー中だけ
+          </label>
+        )}
+        {me && (me.status === 'available' || me.status === 'busy') && (
+          <label className="check" title="オフにすると、ほかの人から対局を申し込まれなくなります">
+            <input type="checkbox" checked={me.status === 'available'} onChange={(e) => void setBusy(!e.target.checked)} />
+            申し込みを受け付ける
+          </label>
+        )}
+      </div>
+      <ul className="people">
+        {user && (
+          <li>
+            <button className="person ai" onClick={onPlayAi}>
+              <span className="avatar">AI</span>
+              <span className="who">
+                <strong>AIと打つ</strong>
+                <small>いつでも対局できます</small>
+              </span>
+              <span className="presence available">対局できます</span>
+            </button>
+          </li>
+        )}
+        {people.map((u) => (
+          <li key={u.id}>
+            <button className={`person${u.id === user?.id ? ' me' : ''}`} onClick={() => onOpen(u)}>
+              <Avatar u={u} />
+              <span className="who">
+                <strong>
+                  {u.displayName}
+                  {following.has(u.id) && <span className="follow-mark" title="フォロー中"> ★</span>}
+                </strong>
+                <small>
+                  {u.displayName !== u.username && `@${u.username} · `}
+                  {u.rank} · Lv{u.level}
+                  {u.id === user?.id && ' · あなた'}
+                </small>
+              </span>
+              <span className={`presence ${u.status}`}>{STATUS_LABEL[u.status]}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      {!people.length && <p className="empty">{q || onlyAvailable || onlyFollowing ? '条件に合う人はいません' : 'オンラインの人はいません'}</p>}
+    </>
+  );
+}
+
+function UserSheet({ u, offline, onClose }: { u: OnlineUser; offline: boolean; onClose: () => void }) {
+  const { user } = useAuth();
+  const { following, setFollow, blocked, setBlock } = useSocial();
+  const [reporting, setReporting] = useState(false);
+  const [asking, setAsking] = useState(false);
+  const [error, setError] = useState('');
+  const isMe = u.id === user?.id;
+  const canAsk = !!user && !isMe && !offline && u.status === 'available';
+
+  const challenge = async (req: SeekRequest) => {
+    setError('');
+    const r = await call('challenge:create', u.id, req);
+    if (r.ok) onClose();
+    else setError(errorText(r.error));
+  };
+
+  return (
+    <Modal title={u.displayName} onClose={onClose}>
+      <div className="sheet-head">
+        <Avatar u={u} size={64} />
+        <div>
+          <div>
+            <UserName u={u} /> <LevelBadge level={u.level} />
+          </div>
+          <small className="meta">
+            レーティング {u.rating} · レート対局 {u.gamesPlayed}局
+          </small>
+          <div>
+            <span className={`presence ${u.status}`}>{offline ? 'オフライン' : STATUS_LABEL[u.status]}</span>
+          </div>
+        </div>
+      </div>
+      {error && <p className="error">{error}</p>}
+      {asking ? (
+        <GameForm submitLabel="申し込む" onSubmit={challenge} onCancel={() => setAsking(false)} />
+      ) : (
+        <div className="buttons stack">
+          {!isMe && (
+            <button className="primary" disabled={!canAsk} onClick={() => setAsking(true)}>
+              対局を申し込む
+            </button>
+          )}
+          {user && !isMe && (
+            <div className="row-buttons">
+              <Link className="button" to={`/messages/${u.id}`}>
+                チャット
+              </Link>
+              <button onClick={() => void setFollow(u.id, !following.has(u.id)).then((e) => e && setError(errorText(e)))}>
+                {following.has(u.id) ? 'フォロー中' : 'フォローする'}
+              </button>
+            </div>
+          )}
+          {!user && <small className="meta">対局の申し込みやチャットにはログインが必要です</small>}
+          {u.gameId && (
+            <Link className="button" to={`/game/${u.gameId}`}>
+              観戦する
+            </Link>
+          )}
+          <Link className="button" to={`/u/${u.username}`}>
+            プロフィールを見る
+          </Link>
+          {user && !isMe && (
+            <div className="row-buttons quiet">
+              <button
+                className="link"
+                onClick={() => {
+                  const block = !blocked.has(u.id);
+                  if (block && !window.confirm(`${u.displayName}さんをブロックしますか？ 対局の申し込みやメッセージが届かなくなり、一覧にも表示されなくなります。`)) return;
+                  void setBlock(u.id, block).then((e) => (e ? setError(errorText(e)) : block && onClose()));
+                }}
+              >
+                {blocked.has(u.id) ? 'ブロックを解除' : 'ブロックする'}
+              </button>
+              <button className="link danger" onClick={() => setReporting(true)}>
+                通報する
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      {reporting && <ReportDialog type="user" id={u.id} onClose={() => setReporting(false)} />}
+    </Modal>
+  );
+}
+
+function SeekList({ lobby, onAccept, onCancel }: { lobby: LobbyState; onAccept: (s: Seek) => void; onCancel: (s: Seek) => void }) {
+  const { user } = useAuth();
+  if (!lobby.seeks.length) return <p className="empty">募集中の対局はありません。右のフォームから募集してみましょう。</p>;
+  return (
+    <table className="list">
+      <thead>
+        <tr>
+          <th>募集者</th>
+          <th>条件</th>
+          <th>持ち時間</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {lobby.seeks.map((s) => (
+          <tr key={s.id}>
+            <td>
+              <UserName u={s.creator} link />
+            </td>
+            <td>
+              {sizeLabel(s.size)} · {s.handicap ? `${s.handicap}子` : `コミ${s.komi}`} · {rulesLabel(s.ruleset)} ·{' '}
+              {s.rated ? 'レート' : '自由'} · 募集者{colorLabel[s.color]}
+            </td>
+            <td>{describeClock(s.clock)}</td>
+            <td className="actions">
+              {user?.id === s.creator.id ? (
+                <button onClick={() => onCancel(s)}>取り消す</button>
+              ) : (
+                <button className="primary" disabled={!user} onClick={() => onAccept(s)}>
+                  対局する
+                </button>
+              )}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function GameList({ lobby }: { lobby: LobbyState }) {
+  if (!lobby.games.length) return <p className="empty">今は対局がありません</p>;
+  return (
+    <ul className="games">
+      {lobby.games.map((g) => (
+        <li key={g.id}>
+          <Link to={`/game/${g.id}`}>
+            ● {g.black.displayName} <span className="rank">{g.black.rank}</span>
+            <BotBadge user={g.black} /> vs ○ {g.white.displayName} <span className="rank">{g.white.rank}</span>
+            <BotBadge user={g.white} />
+          </Link>
+          <small>
+            {sizeLabel(g.size)} · {g.moveCount}手
+          </small>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+const timeOf = (at: number) => new Date(at).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+
+function LobbyChat({ messages: all }: { messages: LobbyChatMessage[] }) {
+  const { user } = useAuth();
+  const { blocked } = useSocial();
+  const messages = all.filter((m) => !blocked.has(m.user.id));
+  const [reporting, setReporting] = useState<string | null>(null);
+  const [text, setText] = useState('');
+  const [error, setError] = useState('');
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages.length]);
+
+  const send = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!text.trim()) return;
+    setError('');
+    const r = await call('lobbychat:send', text);
+    if (r.ok) setText('');
+    else setError(errorText(r.error));
+  };
+
+  return (
+    <section className="card lobby-chat">
+      <h2>ロビーチャット</h2>
+      {user ? (
+        <>
+          <div className="chat-log" ref={listRef}>
+            {messages.length ? (
+              messages.map((m) => (
+                <p key={m.id}>
+                  <UserName u={m.user} link />
+                  <time>{timeOf(m.at)}</time>
+                  {m.user.id !== user.id && (
+                    <button className="link report" onClick={() => setReporting(m.id)} aria-label="このメッセージを通報">
+                      通報
+                    </button>
+                  )}
+                  <br />
+                  {m.text}
+                </p>
+              ))
+            ) : (
+              <p className="empty">まだ発言はありません。あいさつしてみましょう。</p>
+            )}
+          </div>
+          {error && <p className="error">{error}</p>}
+          {reporting && <ReportDialog type="lobbychat" id={reporting} onClose={() => setReporting(null)} />}
+          <form className="chat-input" onSubmit={send}>
+            <input value={text} maxLength={300} placeholder="メッセージ" onChange={(e) => setText(e.target.value)} aria-label="メッセージ" />
+            <button className="primary" disabled={!text.trim()}>
+              送信
+            </button>
+          </form>
+        </>
+      ) : (
+        <p className="empty">
+          <Link to="/login">ログイン</Link>するとチャットを読んだり書いたりできます。
+        </p>
+      )}
+    </section>
+  );
+}
+
+const NewGame = forwardRef<
+  HTMLElement,
+  { mode: Mode; setMode: (m: Mode) => void; onError: (e: string) => void }
+>(function NewGame({ mode, setMode, onError }, ref) {
+  return (
+    <section className="card" ref={ref}>
       <h2>対局を始める</h2>
       <div className="tabs">
         {MODES.map((m) => (
@@ -176,7 +467,7 @@ function NewGame({ onError }: { onError: (e: string) => void }) {
       {mode === 'human' ? <SeekForm onError={onError} /> : <AiForm key={mode} mode={mode} onError={onError} />}
     </section>
   );
-}
+});
 
 function AiForm({ mode, onError }: { mode: 'human-ai' | 'ai-ai'; onError: (e: string) => void }) {
   const navigate = useNavigate();
@@ -335,95 +626,15 @@ function AiForm({ mode, onError }: { mode: 'human-ai' | 'ai-ai'; onError: (e: st
 }
 
 function SeekForm({ onError }: { onError: (e: string) => void }) {
-  const [size, setSize] = useState<9 | 13 | 19>(19);
-  const [preset, setPreset] = useState(1);
-  const [handicap, setHandicap] = useState(0);
-  const [komi, setKomi] = useState(6.5);
-  const [ruleset, setRuleset] = useState<'japanese' | 'chinese'>('japanese');
-  const [rated, setRated] = useState(true);
-  const [color, setColor] = useState<SeekRequest['color']>('random');
-
-  const submit = async (e: FormEvent) => {
-    e.preventDefault();
+  const submit = async (req: SeekRequest) => {
     onError('');
-    const req: SeekRequest = {
-      size,
-      komi: handicap ? 0.5 : komi,
-      handicap,
-      ruleset,
-      clock: CLOCK_PRESETS[preset].clock,
-      rated,
-      color: handicap ? color === 'random' ? 'black' : color : color,
-    };
     const r = await call('seek:create', req);
     if (!r.ok) onError(errorText(r.error));
   };
-
   return (
-    <form className="form" onSubmit={submit}>
-      <label>
-        碁盤
-        <select value={size} onChange={(e) => setSize(Number(e.target.value) as 9 | 13 | 19)}>
-          <option value={19}>19路</option>
-          <option value={13}>13路</option>
-          <option value={9}>9路</option>
-        </select>
-      </label>
-      <label>
-        持ち時間
-        <select value={preset} onChange={(e) => setPreset(Number(e.target.value))}>
-          {CLOCK_PRESETS.map((p, i) => (
-            <option key={p.label} value={i}>
-              {p.label}
-            </option>
-          ))}
-        </select>
-      </label>
-      <div className="row">
-        <label>
-          置き石
-          <select value={handicap} onChange={(e) => setHandicap(Number(e.target.value))}>
-            <option value={0}>互先</option>
-            {[2, 3, 4, 5, 6, 7, 8, 9].filter((h) => size === 19 || h <= 5).map((h) => (
-              <option key={h} value={h}>
-                {h}子
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          コミ
-          <input
-            type="number"
-            step={0.5}
-            value={handicap ? 0.5 : komi}
-            disabled={handicap > 0}
-            onChange={(e) => setKomi(Number(e.target.value))}
-          />
-        </label>
-      </div>
-      <div className="row">
-        <label>
-          ルール
-          <select value={ruleset} onChange={(e) => setRuleset(e.target.value as 'japanese' | 'chinese')}>
-            <option value="japanese">日本ルール</option>
-            <option value="chinese">中国ルール</option>
-          </select>
-        </label>
-        <label>
-          自分の手番
-          <select value={color} onChange={(e) => setColor(e.target.value as SeekRequest['color'])}>
-            <option value="random">ニギリ</option>
-            <option value="black">黒</option>
-            <option value="white">白</option>
-          </select>
-        </label>
-      </div>
-      <label className="check">
-        <input type="checkbox" checked={rated} onChange={(e) => setRated(e.target.checked)} />
-        レーティング対局
-      </label>
-      <button className="primary">募集する</button>
-    </form>
+    <>
+      <GameForm submitLabel="募集する" onSubmit={submit} />
+      <small className="meta">特定の人と打つときは、オンライン一覧からその人を選んで申し込めます。</small>
+    </>
   );
 }

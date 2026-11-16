@@ -19,8 +19,11 @@ services:
       NODE_ENV: development
     ports:
       - "3000:3000"
+    volumes:
+      - uploads:/data/uploads
     depends_on:
       db:
         condition: service_healthy
 volumes:
   pgdata:
+  uploads:

@@ -10,7 +10,7 @@ COPY . .
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-slim
-ENV NODE_ENV=production HOST=0.0.0.0 PORT=3000 WEB_DIST=/app/apps/web/dist
+ENV NODE_ENV=production HOST=0.0.0.0 PORT=3000 WEB_DIST=/app/apps/web/dist UPLOAD_DIR=/data/uploads
 WORKDIR /app
 COPY --from=build /app/node_modules node_modules
 COPY --from=build /app/package.json ./
@@ -20,6 +20,8 @@ COPY --from=build /app/apps/server/package.json apps/server/
 COPY --from=build /app/apps/server/dist apps/server/dist
 COPY --from=build /app/apps/server/migrations apps/server/migrations
 COPY --from=build /app/apps/web/dist apps/web/dist
+# Profile pictures: mount a volume here so they survive a new container.
+RUN mkdir -p /data/uploads && chown -R node /data
 USER node
 EXPOSE 3000
 CMD ["node", "apps/server/dist/index.js"]

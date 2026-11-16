@@ -1,4 +1,8 @@
+import { mkdtempSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import sharp from 'sharp';
 import { Game, PASS, Stone } from '@igo/shared';
 import type { AiGameRequest, ClientToServerEvents, GameView, ServerToClientEvents, SeekRequest } from '@igo/shared';
 import { io as ioClient, Socket } from 'socket.io-client';
@@ -39,7 +43,7 @@ beforeAll(async () => {
   await db.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
   await migrate(db);
   const engines = [new BuiltinEngine(BUILTIN_LEVELS[0], 1), stub];
-  const { app } = await buildApp({ ...loadConfig({}), databaseUrl: url }, db, { engines, moveDelayMs: 0, aiVsAiDelayMs: 0 });
+  const { app } = await buildApp({ ...loadConfig({}), databaseUrl: url, uploadDir: mkdtempSync(join(tmpdir(), 'igo-uploads-')) }, db, { engines, moveDelayMs: 0, aiVsAiDelayMs: 0, authPerMinute: 100 });
   await app.listen({ port: 0, host: '127.0.0.1' });
   base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   close = async () => {
@@ -71,6 +75,34 @@ async function connect(cookie?: string): Promise<Client> {
 
 const emit = <T = any>(s: Client, ev: string, ...args: unknown[]): Promise<T> =>
   new Promise((r) => (s.emit as any)(ev, ...args, r));
+
+const cookies = new Map<string, string>();
+/** Logs in an account made by an earlier test (sign-ups and logins are limited per address, so each logs in once). */
+async function login(username: string) {
+  const known = cookies.get(username);
+  if (known) return known;
+  const res = await fetch(`${base}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username, password: 'password123' }),
+  });
+  expect(res.status).toBe(200);
+  const cookie = res.headers.get('set-cookie')!.split(';')[0];
+  cookies.set(username, cookie);
+  return cookie;
+}
+
+/** The next event of this kind that passes the test. */
+const nextEvent = <T = any>(s: Client, ev: string, pred: (x: T) => boolean = () => true) =>
+  new Promise<T>((r) => {
+    const h = (x: T) => {
+      if (pred(x)) {
+        (s as any).off(ev, h);
+        r(x);
+      }
+    };
+    (s as any).on(ev, h);
+  });
 
 const nextUpdate = (s: Client, pred: (g: GameView) => boolean = () => true) =>
   new Promise<GameView>((r) => {
@@ -343,5 +375,326 @@ describe('protection', () => {
     });
     expect(res.status).toBe(401);
     expect((await res.json()).error).toBe('bad_credentials');
+  });
+
+  it('sends security headers', async () => {
+    const res = await fetch(`${base}/api/health`);
+    expect(res.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+  });
+
+  it('starts only one game when the same person accepts two seeks at once', async () => {
+    // Players from earlier tests whose games have ended.
+    const sa = await connect(await login('quitter'));
+    const sb = await connect(await login('winner'));
+    const one = await emit(sa, 'seek:create', seek);
+    const two = await emit(sa, 'seek:create', { ...seek, size: 13 });
+    expect(one.ok && two.ok).toBe(true);
+    const results = await Promise.all([emit(sb, 'seek:accept', one.seek.id), emit(sb, 'seek:accept', two.seek.id)]);
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(results.find((r) => !r.ok)?.error).toBe('already_playing');
+    const started = results.find((r) => r.ok)!;
+    await emit(sa, 'game:join', started.gameId);
+    expect((await emit(sa, 'game:resign', started.gameId)).ok).toBe(true);
+  });
+});
+
+describe('lobby', () => {
+  it('offers a game to one person: decline, cooldown, busy, counter-offer and accept', async () => {
+    const sa = await connect(await login('alice'));
+    const sb = await connect(await login('black1'));
+    const sc = await connect(await login('slowpoke'));
+    const ids: Record<string, string> = {};
+    for (const [s, n] of [[sa, 'alice'], [sb, 'black1'], [sc, 'slowpoke']] as const) {
+      const j = await emit(s, 'lobby:join');
+      ids[n] = j.lobby.online.find((u: any) => u.username === n).id;
+    }
+
+    const got = nextEvent<any>(sb, 'challenge:received');
+    const made = await emit(sa, 'challenge:create', ids.black1, seek);
+    expect(made.ok).toBe(true);
+    expect((await got).from.username).toBe('alice');
+    expect((await emit(sa, 'challenge:create', ids.slowpoke, seek)).error).toBe('challenge_pending');
+    expect((await emit(sa, 'challenge:create', ids.alice, seek)).error).toBe('own_challenge');
+    expect((await emit(sb, 'challenge:list')).challenges).toHaveLength(1);
+
+    const declined = nextEvent<any>(sa, 'challenge:updated');
+    expect((await emit(sa, 'challenge:respond', made.challenge.id, 'decline', {})).error).toBe('not_your_challenge');
+    expect((await emit(sb, 'challenge:respond', made.challenge.id, 'decline', { reason: '今は打てません' })).ok).toBe(true);
+    expect(await declined).toMatchObject({ outcome: 'declined', reason: '今は打てません' });
+    expect((await emit(sa, 'challenge:create', ids.black1, seek)).error).toBe('challenge_cooldown');
+
+    expect((await emit(sc, 'presence:setStatus', 'busy')).ok).toBe(true);
+    expect((await emit(sa, 'challenge:create', ids.slowpoke, seek)).error).toBe('opponent_busy');
+    const state = await nextEvent<any>(sa, 'lobby:state', (l) => l.online.some((u: any) => u.status === 'busy'));
+    expect(state.online.find((u: any) => u.username === 'slowpoke').status).toBe('busy');
+    expect((await emit(sc, 'presence:setStatus', 'available')).ok).toBe(true);
+
+    // slowpoke offers black on 9x9; alice answers with 13x13, taking white herself.
+    const first = await emit(sc, 'challenge:create', ids.alice, seek);
+    const countered = nextEvent<any>(sc, 'challenge:updated');
+    const counter = await emit(sa, 'challenge:respond', first.challenge.id, 'counter', { request: { ...seek, size: 13, color: 'white' } });
+    expect(counter.ok).toBe(true);
+    expect((await countered).outcome).toBe('countered');
+    expect((await emit(sc, 'challenge:respond', counter.challenge.id, 'counter', { request: seek })).error).toBe('counter_once');
+
+    const started = nextEvent<string>(sa, 'game:start');
+    const accepted = await emit(sc, 'challenge:respond', counter.challenge.id, 'accept', {});
+    expect(accepted.ok).toBe(true);
+    expect(await started).toBe(accepted.gameId);
+    const joined = await emit(sa, 'game:join', accepted.gameId);
+    expect(joined.game.state.settings.size).toBe(13);
+    expect(joined.game.white.username).toBe('alice');
+    const playing = await nextEvent<any>(sb, 'lobby:state', (l) => l.online.some((u: any) => u.status === 'playing'));
+    expect(playing.online.find((u: any) => u.username === 'alice')).toMatchObject({ status: 'playing', gameId: accepted.gameId });
+    // Someone in a game cannot be challenged.
+    expect((await emit(sb, 'challenge:create', ids.alice, seek)).error).toBe('opponent_playing');
+    expect((await emit(sa, 'game:resign', accepted.gameId)).ok).toBe(true);
+  });
+
+  it('keeps a lobby chat for members', async () => {
+    const guest = await connect();
+    expect((await emit(guest, 'lobby:join')).chat).toEqual([]);
+    expect((await emit(guest, 'lobbychat:send', 'hello')).error).toBe('login_required');
+
+    const s = await connect(await login('alice'));
+    expect((await emit(s, 'lobbychat:send', 'hi')).error).toBe('not_in_lobby');
+    await emit(s, 'lobby:join');
+    const heard = nextEvent<any>(guest, 'lobbychat:message');
+    expect((await emit(s, 'lobbychat:send', '  よろしくお願いします  ')).ok).toBe(true);
+    expect((await heard).text).toBe('よろしくお願いします');
+    expect((await emit(s, 'lobbychat:send', '   ')).error).toBe('invalid_chat');
+    const again = await emit(s, 'lobby:join');
+    expect(again.chat.at(-1)).toMatchObject({ text: 'よろしくお願いします', user: { username: 'alice' } });
+  });
+
+  it('follows people and sends messages between two', async () => {
+    const sa = await connect(await login('alice'));
+    const sb = await connect(await login('black1'));
+    const ids: Record<string, string> = {};
+    const j = await emit(sa, 'lobby:join');
+    for (const n of ['alice', 'black1']) ids[n] = j.lobby.online.find((u: any) => u.username === n)?.id;
+    expect(ids.black1).toBeTruthy();
+
+    expect((await emit(sa, 'follow:set', ids.alice, true)).error).toBe('invalid_target');
+    expect((await emit(sa, 'follow:set', ids.black1, true)).ok).toBe(true);
+    expect((await emit(sa, 'follow:set', ids.black1, true)).ok).toBe(true);
+    expect((await emit(sa, 'follow:list')).ids).toEqual([ids.black1]);
+    const profile = await (await fetch(`${base}/api/users/black1`, { headers: { cookie: await login('alice') } })).json();
+    expect(profile.follows.followers).toBe(1);
+    expect(profile.following).toBe(true);
+
+    // alice wrote in the lobby chat just before (3 messages per 5 seconds), so black1 writes.
+    const got = nextEvent<any>(sa, 'dm:message');
+    const sent = await emit(sb, 'dm:send', ids.alice, 'こんど9路で打ちませんか');
+    expect(sent.ok).toBe(true);
+    expect((await got).text).toBe('こんど9路で打ちませんか');
+    expect((await emit(sb, 'dm:send', '999999', 'hi')).error).toBe('no_such_user');
+    const bots = await emit(sb, 'ai:engines');
+    expect((await emit(sb, 'dm:send', bots.engines[0].user.id, 'hi')).error).toBe('invalid_target');
+
+    let conv = (await emit(sa, 'dm:conversations')).conversations;
+    expect(conv[0]).toMatchObject({ user: { username: 'black1' }, unread: 1, last: { text: 'こんど9路で打ちませんか' } });
+    const h = await emit(sa, 'dm:history', ids.black1);
+    expect(h.messages.map((m: any) => m.text)).toEqual(['こんど9路で打ちませんか']);
+    conv = (await emit(sa, 'dm:conversations')).conversations;
+    expect(conv[0].unread).toBe(0);
+
+    expect((await emit(sa, 'follow:set', ids.black1, false)).ok).toBe(true);
+    expect((await emit(sa, 'follow:list')).ids).toEqual([]);
+  });
+});
+
+describe('profile', () => {
+  const patch = async (cookie: string, body: object) =>
+    fetch(`${base}/api/me/profile`, { method: 'PATCH', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+  it('changes the nickname once a day and the declared rank while few games are played', async () => {
+    const cookie = await login('alice');
+    const before = await (await fetch(`${base}/api/me/profile`, { headers: { cookie } })).json();
+    expect(before.profile).toMatchObject({ displayName: null, declaredRank: '3d', rankResetsRating: true });
+    expect(before.user.displayName).toBe('alice');
+
+    expect((await (await patch(cookie, { displayName: '公式アカウント' })).json()).error).toBe('reserved_display_name');
+    expect((await (await patch(cookie, { displayName: 'a\u200bb' })).json()).error).toBe('invalid_display_name');
+    const ok = await (await patch(cookie, { displayName: ' アリス ' })).json();
+    expect(ok.user.displayName).toBe('アリス');
+    expect(ok.profile.nameChangeAt).toBeGreaterThan(Date.now());
+    const again = await patch(cookie, { displayName: 'ありす' });
+    expect(again.status).toBe(429);
+    expect((await again.json()).error).toBe('display_name_cooldown');
+
+    const ranked = await (await patch(cookie, { declaredRank: '1k' })).json();
+    expect(ranked.profile.declaredRank).toBe('1k');
+    expect(ranked.user.rank).toBe('1級');
+    expect((await patch(cookie, { declaredRank: '45k' })).status).toBe(400);
+    expect((await patch(cookie, { role: 'admin' })).status).toBe(400);
+  });
+
+  it('stores a picture as WebP without its metadata, and removes it', async () => {
+    const cookie = await login('alice');
+    const png = await sharp({ create: { width: 600, height: 400, channels: 3, background: '#c33' } })
+      .withMetadata({ exif: { IFD0: { Copyright: 'secret place' } } })
+      .jpeg()
+      .toBuffer();
+    const upload = (data: Buffer, name: string, type: string) => {
+      const form = new FormData();
+      form.append('file', new Blob([new Uint8Array(data)], { type }), name);
+      return fetch(`${base}/api/me/avatar`, { method: 'POST', headers: { cookie }, body: form });
+    };
+    const res = await upload(png, 'me.jpg', 'image/jpeg');
+    expect(res.status).toBe(200);
+    const { user } = await res.json();
+    expect(user.avatarUrl).toMatch(/^\/avatars\/[0-9a-f-]{36}-256\.webp$/);
+    const img = await fetch(`${base}${user.avatarUrl}`);
+    expect(img.headers.get('content-type')).toBe('image/webp');
+    const meta = await sharp(Buffer.from(await img.arrayBuffer())).metadata();
+    expect([meta.width, meta.height, meta.exif]).toEqual([256, 256, undefined]);
+    expect((await fetch(`${base}${user.avatarUrl.replace('-256', '-64')}`)).status).toBe(200);
+
+    // Judged by content: a script named .png is refused.
+    const fake = await upload(Buffer.from('<svg onload=alert(1)>'), 'x.png', 'image/png');
+    expect((await fake.json()).error).toBe('invalid_image');
+    expect((await fetch(`${base}/avatars/..%2F..%2Fetc%2Fpasswd`)).status).toBe(404);
+
+    const removed = await (await fetch(`${base}/api/me/avatar`, { method: 'DELETE', headers: { cookie } })).json();
+    expect(removed.user.avatarUrl).toBeNull();
+    expect((await fetch(`${base}${user.avatarUrl}`)).status).toBe(404);
+  });
+
+  it('counts finished games towards the level', async () => {
+    const p = await (await fetch(`${base}/api/users/black1`)).json();
+    // The full game in "play" counts; games resigned before 4 moves do not.
+    expect(p.gamesCompleted).toBe(1);
+    expect(p.user.level).toBe(1);
+  });
+});
+
+describe('news', () => {
+  const draft = {
+    title: 'メンテナンスのお知らせ',
+    body: '# 作業内容\n\n**サーバーを更新**します。<script>alert(1)</script>',
+    category: 'maintenance',
+    important: true,
+    pinned: false,
+    publishAt: null,
+    expireAt: null,
+  };
+  const send = (method: string, path: string, cookie: string, body?: object) =>
+    fetch(`${base}${path}`, {
+      method,
+      headers: body ? { cookie, 'content-type': 'application/json' } : { cookie },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+
+  it('lets admins write, schedule and publish news, and counts unread', async () => {
+    await db.query("UPDATE users SET role = 'admin' WHERE username = 'alice'");
+    const admin = await login('alice');
+    const reader = await login('black1');
+    expect((await send('POST', '/api/admin/news', reader, draft)).status).toBe(403);
+    expect((await send('POST', '/api/admin/news', admin, { ...draft, category: 'other' })).status).toBe(400);
+
+    const unreadBefore = (await (await send('GET', '/api/news/unread-count', reader)).json()).count;
+    const created = await (await send('POST', '/api/admin/news', admin, draft)).json();
+    expect(created.item.publishAt).toBeNull();
+    // A draft is not shown.
+    expect((await fetch(`${base}/api/news/${created.item.id}`)).status).toBe(404);
+    const later = await (await send('POST', '/api/admin/news', admin, { ...draft, title: '来週のイベント', category: 'event', important: false, publishAt: Date.now() + 3_600_000 })).json();
+    expect((await (await fetch(`${base}/api/news`)).json()).items.map((n: any) => n.id)).not.toContain(later.item.id);
+
+    const s = await connect(reader);
+    const heard = nextEvent<any>(s, 'news:published');
+    const published = await send('PATCH', `/api/admin/news/${created.item.id}`, admin, { ...draft, publishAt: Date.now() - 1000 });
+    expect(published.status).toBe(200);
+    expect(await heard).toMatchObject({ id: created.item.id, title: 'メンテナンスのお知らせ' });
+    expect((await heard).body).toBeUndefined();
+
+    const list = await (await fetch(`${base}/api/news?category=maintenance`)).json();
+    expect(list.items[0]).toMatchObject({ id: created.item.id, important: true });
+    expect((await (await fetch(`${base}/api/news/important`)).json()).items[0].id).toBe(created.item.id);
+    expect((await (await send('GET', '/api/news/unread-count', reader)).json()).count).toBe(unreadBefore + 1);
+    await send('POST', '/api/news/read', reader);
+    expect((await (await send('GET', '/api/news/unread-count', reader)).json()).count).toBe(0);
+
+    expect((await send('DELETE', `/api/admin/news/${later.item.id}`, admin)).status).toBe(200);
+    const audit = await db.query("SELECT action FROM admin_audit WHERE action LIKE 'news.%' ORDER BY id");
+    expect(audit.rows.map((r) => r.action)).toEqual(['news.create', 'news.create', 'news.update', 'news.delete']);
+  });
+});
+
+describe('blocks, reports and leaving', () => {
+  const post = (path: string, cookie: string, body: object, method = 'POST') =>
+    fetch(`${base}${path}`, { method, headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+  it('stops challenges and messages between people when one blocks the other', async () => {
+    const a = await register('blocker');
+    const b = await register('pest');
+    const sa = await connect(a.cookie);
+    const sb = await connect(b.cookie);
+    await emit(sa, 'lobby:join');
+    expect((await emit(sb, 'follow:set', a.user.id, true)).ok).toBe(true);
+    expect((await emit(sa, 'block:set', b.user.id, true)).ok).toBe(true);
+    expect((await emit(sa, 'block:list')).ids).toEqual([b.user.id]);
+    // The follow ended, and nothing reaches the blocker.
+    expect((await emit(sb, 'follow:list')).ids).toEqual([]);
+    expect((await emit(sb, 'follow:set', a.user.id, true)).error).toBe('user_unavailable');
+    expect((await emit(sb, 'dm:send', a.user.id, 'hey')).error).toBe('user_unavailable');
+    expect((await emit(sb, 'challenge:create', a.user.id, seek)).error).toBe('user_unavailable');
+    expect((await emit(sa, 'block:set', b.user.id, false)).ok).toBe(true);
+    expect((await emit(sb, 'dm:send', a.user.id, 'sorry')).ok).toBe(true);
+  });
+
+  it('takes reports, and lets an admin remove a message and suspend the writer', async () => {
+    const admin = await login('alice'); // made admin in the news test
+    const reporter = await login('blocker');
+    const writer = await login('pest');
+    const sw = await connect(writer);
+    await emit(sw, 'lobby:join');
+    const heard = nextEvent<any>(sw, 'lobbychat:message');
+    expect((await emit(sw, 'lobbychat:send', 'ひどい言葉')).ok).toBe(true);
+    const msg = await heard;
+
+    expect((await post('/api/reports', reporter, { targetType: 'lobbychat', targetId: msg.id, reason: 'nope' })).status).toBe(400);
+    expect((await post('/api/reports', writer, { targetType: 'lobbychat', targetId: msg.id, reason: 'harassment' })).status).toBe(400);
+    expect((await post('/api/reports', reporter, { targetType: 'lobbychat', targetId: '999999', reason: 'harassment' })).status).toBe(404);
+    expect((await post('/api/reports', reporter, { targetType: 'lobbychat', targetId: msg.id, reason: 'harassment', detail: '何度も' })).status).toBe(200);
+
+    expect((await fetch(`${base}/api/admin/reports`, { headers: { cookie: reporter } })).status).toBe(403);
+    const open = (await (await fetch(`${base}/api/admin/reports`, { headers: { cookie: admin } })).json()).reports;
+    const r = open.find((x: any) => x.targetId === msg.id);
+    expect(r).toMatchObject({ snapshot: 'ひどい言葉', reason: 'harassment', targetUser: { username: 'pest' } });
+
+    expect((await post(`/api/admin/reports/${r.id}/resolve`, admin, { action: 'delete_message' })).status).toBe(200);
+    const chat = (await emit(sw, 'lobby:join')).chat;
+    expect(chat.some((m: any) => m.id === msg.id)).toBe(false);
+
+    const closed = new Promise<void>((res) => sw.on('disconnect', () => res()));
+    expect((await post('/api/reports', reporter, { targetType: 'user', targetId: r.targetUser.id, reason: 'harassment' })).status).toBe(200);
+    const again = (await (await fetch(`${base}/api/admin/reports`, { headers: { cookie: admin } })).json()).reports;
+    expect((await post(`/api/admin/reports/${again[again.length - 1].id}/resolve`, admin, { action: 'ban' })).status).toBe(200);
+    await closed;
+    expect((await (await fetch(`${base}/api/me`, { headers: { cookie: writer } })).json()).user).toBeNull();
+    const relogin = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'pest', password: 'password123' }),
+    });
+    expect((await relogin.json()).error).toBe('account_suspended');
+  });
+
+  it('deletes an account but keeps its games under a neutral name', async () => {
+    const { cookie, user } = await register('leaver');
+    const s = await connect(cookie);
+    const g = await emit(s, 'ai:start', { ...ai, black: null, white: 'stub' });
+    expect((await post('/api/me', cookie, { password: 'password123' }, 'DELETE')).status).toBe(409);
+    await emit(s, 'game:join', g.gameId);
+    await emit(s, 'game:resign', g.gameId);
+    expect((await post('/api/me', cookie, { password: 'wrong-password' }, 'DELETE')).status).toBe(401);
+    expect((await post('/api/me', cookie, { password: 'password123' }, 'DELETE')).status).toBe(200);
+    expect((await (await fetch(`${base}/api/me`, { headers: { cookie } })).json()).user).toBeNull();
+    const game = await (await fetch(`${base}/api/games/${g.gameId}`)).json();
+    expect(game.black).toMatchObject({ id: user.id, displayName: '退会したユーザー', username: `deleted_${user.id}` });
+    // The name is free again.
+    expect((await register('leaver')).user.username).toBe('leaver');
   });
 });
