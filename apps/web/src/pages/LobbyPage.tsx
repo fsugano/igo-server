@@ -7,6 +7,7 @@ import { useAuth } from '../auth';
 import { BotBadge } from '../components/BotBadge';
 import { CLOCK_PRESETS, GameForm, colorLabel, rulesLabel, sizeLabel } from '../components/GameForm';
 import { Modal } from '../components/Modal';
+import { ReportDialog } from '../components/ReportDialog';
 import { NewsBanner } from './NewsPage';
 import { Avatar, LevelBadge, UserName } from '../components/UserBits';
 import { useSocial } from '../social';
@@ -151,7 +152,7 @@ function OnlineList({
   onError: (e: string) => void;
 }) {
   const { user } = useAuth();
-  const { following } = useSocial();
+  const { following, blocked } = useSocial();
   const [query, setQuery] = useState('');
   const [onlyAvailable, setOnlyAvailable] = useState(false);
   const [onlyFollowing, setOnlyFollowing] = useState(false);
@@ -164,7 +165,8 @@ function OnlineList({
       (u) =>
         (!q || u.username.toLowerCase().includes(q) || u.displayName.toLowerCase().includes(q)) &&
         (!onlyAvailable || u.status === 'available') &&
-        (!onlyFollowing || following.has(u.id)),
+        (!onlyFollowing || following.has(u.id)) &&
+        !blocked.has(u.id),
     )
     .sort((a, b) => {
       const ra = rank(a);
@@ -238,7 +240,8 @@ function OnlineList({
 
 function UserSheet({ u, offline, onClose }: { u: OnlineUser; offline: boolean; onClose: () => void }) {
   const { user } = useAuth();
-  const { following, setFollow } = useSocial();
+  const { following, setFollow, blocked, setBlock } = useSocial();
+  const [reporting, setReporting] = useState(false);
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState('');
   const isMe = u.id === user?.id;
@@ -296,8 +299,26 @@ function UserSheet({ u, offline, onClose }: { u: OnlineUser; offline: boolean; o
           <Link className="button" to={`/u/${u.username}`}>
             プロフィールを見る
           </Link>
+          {user && !isMe && (
+            <div className="row-buttons quiet">
+              <button
+                className="link"
+                onClick={() => {
+                  const block = !blocked.has(u.id);
+                  if (block && !window.confirm(`${u.displayName}さんをブロックしますか？ 対局の申し込みやメッセージが届かなくなり、一覧にも表示されなくなります。`)) return;
+                  void setBlock(u.id, block).then((e) => (e ? setError(errorText(e)) : block && onClose()));
+                }}
+              >
+                {blocked.has(u.id) ? 'ブロックを解除' : 'ブロックする'}
+              </button>
+              <button className="link danger" onClick={() => setReporting(true)}>
+                通報する
+              </button>
+            </div>
+          )}
         </div>
       )}
+      {reporting && <ReportDialog type="user" id={u.id} onClose={() => setReporting(false)} />}
     </Modal>
   );
 }
@@ -364,8 +385,11 @@ function GameList({ lobby }: { lobby: LobbyState }) {
 
 const timeOf = (at: number) => new Date(at).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
 
-function LobbyChat({ messages }: { messages: LobbyChatMessage[] }) {
+function LobbyChat({ messages: all }: { messages: LobbyChatMessage[] }) {
   const { user } = useAuth();
+  const { blocked } = useSocial();
+  const messages = all.filter((m) => !blocked.has(m.user.id));
+  const [reporting, setReporting] = useState<string | null>(null);
   const [text, setText] = useState('');
   const [error, setError] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
@@ -395,6 +419,11 @@ function LobbyChat({ messages }: { messages: LobbyChatMessage[] }) {
                 <p key={m.id}>
                   <UserName u={m.user} link />
                   <time>{timeOf(m.at)}</time>
+                  {m.user.id !== user.id && (
+                    <button className="link report" onClick={() => setReporting(m.id)} aria-label="このメッセージを通報">
+                      通報
+                    </button>
+                  )}
                   <br />
                   {m.text}
                 </p>
@@ -404,6 +433,7 @@ function LobbyChat({ messages }: { messages: LobbyChatMessage[] }) {
             )}
           </div>
           {error && <p className="error">{error}</p>}
+          {reporting && <ReportDialog type="lobbychat" id={reporting} onClose={() => setReporting(null)} />}
           <form className="chat-input" onSubmit={send}>
             <input value={text} maxLength={300} placeholder="メッセージ" onChange={(e) => setText(e.target.value)} aria-label="メッセージ" />
             <button className="primary" disabled={!text.trim()}>

@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { errorText } from '../api';
 import { useAuth } from '../auth';
 import { ChallengeDialog } from '../components/ChallengeDialog';
+import { ReportDialog } from '../components/ReportDialog';
 import { Avatar, UserName } from '../components/UserBits';
 import { useSocial } from '../social';
 import { call } from '../socket';
@@ -61,7 +62,8 @@ export function MessagesPage() {
 
 function Thread({ userId }: { userId: string }) {
   const { user } = useAuth();
-  const { onMessage, refreshConversations, following, setFollow } = useSocial();
+  const { onMessage, refreshConversations, following, setFollow, blocked, setBlock } = useSocial();
+  const [reporting, setReporting] = useState<string | null>(null);
   const navigate = useNavigate();
   const [other, setOther] = useState<PublicUser | null>(null);
   const [messages, setMessages] = useState<DirectMessage[]>([]);
@@ -118,8 +120,18 @@ function Thread({ userId }: { userId: string }) {
             <button onClick={() => void setFollow(userId, !follows).then((e) => e && setError(errorText(e)))}>
               {follows ? 'フォロー中' : 'フォローする'}
             </button>
-            <button className="primary" onClick={() => setAsking(true)}>
+            <button className="primary" onClick={() => setAsking(true)} disabled={blocked.has(userId)}>
               対局を申し込む
+            </button>
+            <button
+              className="link"
+              onClick={() => {
+                const block = !blocked.has(userId);
+                if (block && !window.confirm(`${other.displayName}さんをブロックしますか？ メッセージや対局の申し込みが届かなくなります。`)) return;
+                void setBlock(userId, block).then((e) => e && setError(errorText(e)));
+              }}
+            >
+              {blocked.has(userId) ? 'ブロックを解除' : 'ブロック'}
             </button>
           </>
         ) : (
@@ -133,6 +145,11 @@ function Thread({ userId }: { userId: string }) {
             <small>
               {when(m.at)}
               {m.fromId === user?.id && m.readAt && ' · 既読'}
+              {m.fromId !== user?.id && (
+                <button className="link report" onClick={() => setReporting(m.id)} aria-label="このメッセージを通報">
+                  通報
+                </button>
+              )}
             </small>
           </div>
         ))}
@@ -148,6 +165,7 @@ function Thread({ userId }: { userId: string }) {
         </form>
       )}
       {asking && other && <ChallengeDialog to={other} onClose={() => setAsking(false)} />}
+      {reporting && <ReportDialog type="dm" id={reporting} onClose={() => setReporting(null)} />}
     </section>
   );
 }

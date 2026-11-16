@@ -179,6 +179,31 @@ export interface NewsItem {
   expireAt: number | null;
 }
 
+export type ReportTarget = 'user' | 'avatar' | 'lobbychat' | 'dm';
+export const REPORT_REASONS = {
+  spam: '迷惑な宣伝・連投',
+  harassment: '嫌がらせ・暴言',
+  inappropriate: '不適切な名前・画像・内容',
+  cheating: '不正（AI の使用など）',
+  other: 'その他',
+} as const;
+export type ReportReason = keyof typeof REPORT_REASONS;
+
+export interface Report {
+  id: string;
+  targetType: ReportTarget;
+  targetId: string;
+  targetUser: PublicUser | null;
+  reporter: PublicUser | null;
+  reason: ReportReason;
+  detail: string | null;
+  /** The reported text as it was. */
+  snapshot: string | null;
+  status: 'open' | 'resolved' | 'dismissed';
+  action: string | null;
+  at: number;
+}
+
 export type Ack<T = {}> = (res: ({ ok: true } & T) | { ok: false; error: string }) => void;
 
 export interface ClientToServerEvents {
@@ -200,6 +225,9 @@ export interface ClientToServerEvents {
   /** People I follow (their ids). */
   'follow:list': (ack: Ack<{ ids: string[] }>) => void;
   'follow:set': (userId: string, follow: boolean, ack: Ack) => void;
+  /** People I have blocked. */
+  'block:list': (ack: Ack<{ ids: string[] }>) => void;
+  'block:set': (userId: string, block: boolean, ack: Ack) => void;
   'dm:conversations': (ack: Ack<{ conversations: Conversation[] }>) => void;
   /** The latest messages with this person, oldest first. Marks the ones to me as read. */
   'dm:history': (userId: string, ack: Ack<{ user: PublicUser; messages: DirectMessage[] }>) => void;

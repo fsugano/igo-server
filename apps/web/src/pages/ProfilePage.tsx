@@ -5,6 +5,7 @@ import { useAuth } from '../auth';
 import { PlayerStats } from '../components/PlayerStats';
 import { Avatar, LevelBadge } from '../components/UserBits';
 import { useSocial } from '../social';
+import { ReportDialog } from '../components/ReportDialog';
 import { declaredRankLabel } from '@igo/shared';
 import { resultText } from './GamePage';
 
@@ -13,7 +14,8 @@ export function ProfilePage() {
   const [data, setData] = useState<Awaited<ReturnType<typeof api.profile>> | null>(null);
   const [missing, setMissing] = useState(false);
   const { user: me } = useAuth();
-  const { following, setFollow } = useSocial();
+  const { following, setFollow, blocked, setBlock } = useSocial();
+  const [reporting, setReporting] = useState<'user' | 'avatar' | null>(null);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -72,8 +74,27 @@ export function ProfilePage() {
           <Link className="button" to={`/messages/${user.id}`}>
             メッセージを送る
           </Link>
+          <button
+            className="link"
+            onClick={() => {
+              const block = !blocked.has(user.id);
+              if (block && !window.confirm(`${user.displayName}さんをブロックしますか？ 対局の申し込みやメッセージが届かなくなります。`)) return;
+              void setBlock(user.id, block).then((e) => e && setError(errorText(e)));
+            }}
+          >
+            {blocked.has(user.id) ? 'ブロックを解除' : 'ブロックする'}
+          </button>
+          <button className="link danger" onClick={() => setReporting('user')}>
+            通報する
+          </button>
+          {user.avatarUrl && (
+            <button className="link danger" onClick={() => setReporting('avatar')}>
+              画像を通報する
+            </button>
+          )}
         </div>
       )}
+      {reporting && <ReportDialog type={reporting} id={user.id} onClose={() => setReporting(null)} />}
       {error && <p className="error">{error}</p>}
       {mine && <RecordingConsent />}
       <PlayerStats username={user.username} />

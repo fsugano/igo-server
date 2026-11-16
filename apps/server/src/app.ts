@@ -41,6 +41,7 @@ import { AVATAR_FILE, AVATAR_MAX_BYTES, removeAvatar, saveAvatar } from './avata
 import { Challenges } from './challenges.js';
 import { Lobby, aiGameSchema, validHandicap } from './lobby.js';
 import { LobbyChat } from './lobby-chat.js';
+import { Moderation, RESOLUTIONS, Resolution, reportSchema } from './moderation.js';
 import { News, newsSchema } from './news.js';
 import { Settings } from './settings.js';
 import { Social } from './social.js';
@@ -84,6 +85,8 @@ export interface AppOptions extends Omit<BotOptions, 'engines'> {
   evaluator?: Evaluator;
   /** What computer players say in the chat. Default: Claude when ANTHROPIC_API_KEY is set, set phrases otherwise. */
   chat?: ChatResponder;
+  /** Logins and sign-ups per minute from one address (tests raise it). */
+  authPerMinute?: number;
 }
 
 export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
@@ -120,6 +123,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
   const lobbyChat = new LobbyChat(db);
   const social = new Social(db);
   const news = new News(db);
+  const moderation = new Moderation(db);
   const settings = new Settings(db);
   await settings.load();
 
@@ -260,7 +264,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     reply.setCookie(SESSION_COOKIE, token, cookieOpts);
   }
 
-  const authLimit = { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } };
+  const authLimit = { config: { rateLimit: { max: opts.authPerMinute ?? 10, timeWindow: '1 minute' } } };
 
   app.get('/api/health', async () => ({ ok: true }));
 
@@ -288,6 +292,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     if (!u || !ok) {
       return reply.code(401).send({ error: 'bad_credentials' });
     }
+    if (cred.banned) return reply.code(403).send({ error: 'account_suspended' });
     await startSession(reply, u);
     return { user: toPublicUser(u) };
   });
@@ -413,6 +418,80 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       .header('content-type', 'image/webp')
       .header('cache-control', 'public, max-age=31536000, immutable')
       .send(createReadStream(path));
+  });
+
+  // ---- Leaving, reports ----
+
+  const deleteSchema = z.object({ password: z.string().max(200) }).strict();
+
+  /** Leaving (M-AUTH-04/05): asks for the password again; the games stay under "退会したユーザー". */
+  app.delete('/api/me', authLimit, async (req, reply) => {
+    const u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    const p = deleteSchema.safeParse(req.body);
+    if (!p.success) return reply.code(400).send({ error: 'invalid_input' });
+    const hash = await users.passwordHash(u.id);
+    if (!hash || !(await verifyPassword(p.data.password, hash))) return reply.code(401).send({ error: 'bad_password' });
+    if (userInGame(u.id)) return reply.code(409).send({ error: 'in_game' });
+    const avatar = await users.deleteAccount(u.id);
+    await removeAvatar(config.uploadDir, avatar);
+    signOutEverywhere(u.id);
+    app.log.info({ user: u.id }, 'account deleted');
+    reply.clearCookie(SESSION_COOKIE, { path: '/' });
+    return { ok: true };
+  });
+
+  /** Ends the realtime connections of someone who left or was suspended. */
+  function signOutEverywhere(userId: string) {
+    challenges.dropUser(userId);
+    for (const [id, s] of lobby.seeks) if (s.creator.id === userId) lobby.seeks.delete(id);
+    io.in(userRoom(userId)).disconnectSockets(true);
+    broadcastLobby();
+  }
+
+  const reportLimit = {
+    config: {
+      rateLimit: { max: 20, timeWindow: '1 day', keyGenerator: (req: FastifyRequest) => req.cookies[SESSION_COOKIE] ?? req.ip },
+    },
+  };
+
+  app.post('/api/reports', reportLimit, async (req, reply) => {
+    const u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    const p = reportSchema.safeParse(req.body);
+    if (!p.success) return reply.code(400).send({ error: 'invalid_input' });
+    const err = await moderation.report(u.id, p.data);
+    if (err) return reply.code(err === 'no_such_target' ? 404 : 400).send({ error: err });
+    return { ok: true };
+  });
+
+  app.get<{ Querystring: { status?: string } }>('/api/admin/reports', async (req, reply) => {
+    if (!(await requireRole(req, reply, ['admin']))) return;
+    return { reports: await moderation.list(req.query.status === 'closed' ? 'closed' : 'open') };
+  });
+
+  app.post<{ Params: { id: string } }>('/api/admin/reports/:id/resolve', async (req, reply) => {
+    const admin = await requireRole(req, reply, ['admin']);
+    if (!admin) return;
+    const action = (req.body as { action?: string } | null)?.action as Resolution;
+    if (!RESOLUTIONS.includes(action)) return reply.code(400).send({ error: 'invalid_input' });
+    const r = await moderation.get(req.params.id);
+    if (!r) return reply.code(404).send({ error: 'not_found' });
+    const target = r.target_user_id ? String(r.target_user_id) : null;
+    if (action === 'remove_avatar' && target) {
+      const old = await users.setAvatar(target, null);
+      await removeAvatar(config.uploadDir, old);
+      const row = await users.byId(target);
+      if (row) userChanged(row);
+    }
+    if (action === 'delete_message') await moderation.deleteMessage(r.target_type, r.target_id);
+    if (action === 'ban' && target) {
+      if (!(await users.setBanned(target, true))) return reply.code(400).send({ error: 'cannot_ban' });
+      signOutEverywhere(target);
+    }
+    await moderation.close(r.id, admin.id, action);
+    await news.audit(admin.id, `report.${action}`, r.id, { targetType: r.target_type, targetId: r.target_id, user: target });
+    return { ok: true };
   });
 
   // ---- News ----
@@ -770,7 +849,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       ack({ ok: true, challenges: challenges.list(u.id) });
     }));
 
-    socket.on('challenge:create', safe((userId, req, ack) => {
+    socket.on('challenge:create', safe(async (userId, req, ack) => {
       const u = needUser(ack);
       if (!u) return;
       if (userInGame(u.id) || starting.has(u.id)) return ack({ ok: false, error: 'already_playing' });
@@ -778,6 +857,11 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       if (!target) return ack({ ok: false, error: 'user_offline' });
       if (userInGame(target.id) || starting.has(target.id)) return ack({ ok: false, error: 'opponent_playing' });
       if (lobby.isBusy(target.id)) return ack({ ok: false, error: 'opponent_busy' });
+      if (await moderation.blockedEither(u.id, target.id)) return ack({ ok: false, error: 'user_unavailable' });
+      // The block check waited for the database: look at presence and games again.
+      if (!lobby.isOnline(target.id)) return ack({ ok: false, error: 'user_offline' });
+      if (userInGame(target.id) || starting.has(target.id)) return ack({ ok: false, error: 'opponent_playing' });
+      if (userInGame(u.id) || starting.has(u.id)) return ack({ ok: false, error: 'already_playing' });
       const c = challenges.create(u, target, req);
       if (typeof c === 'string') return ack({ ok: false, error: c });
       ack({ ok: true, challenge: c });
@@ -845,8 +929,28 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     socket.on('follow:set', safe(async (userId, follow, ack) => {
       const u = needUser(ack);
       if (!u) return;
+      if (follow && (await moderation.blockedEither(u.id, String(userId)))) return ack({ ok: false, error: 'user_unavailable' });
       const err = await social.setFollow(u.id, String(userId), !!follow);
       ack(err ? { ok: false, error: err } : { ok: true });
+    }));
+
+    socket.on('block:list', safe(async (ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      ack({ ok: true, ids: await moderation.blocked(u.id) });
+    }));
+
+    socket.on('block:set', safe(async (userId, block, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      const err = await moderation.setBlock(u.id, String(userId), !!block);
+      if (err) return ack({ ok: false, error: err });
+      // Open challenges between them end.
+      if (block) for (const c of challenges.list(u.id)) if (c.from.id === String(userId) || c.to.id === String(userId)) {
+        if (c.from.id === u.id) challenges.cancel(u.id, c.id);
+        else challenges.decline(u.id, c.id);
+      }
+      ack({ ok: true });
     }));
 
     socket.on('dm:conversations', safe(async (ack) => {
@@ -878,6 +982,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       if (!u) return;
       const other = await social.recipient(u.id, String(userId));
       if (typeof other === 'string') return ack({ ok: false, error: other });
+      if (await moderation.blockedEither(u.id, other.id)) return ack({ ok: false, error: 'user_unavailable' });
       const msg = await social.send(u.id, other.id, text);
       if (!msg) return ack({ ok: false, error: 'invalid_chat' });
       io.to(userRoom(u.id)).to(userRoom(other.id)).emit('dm:message', msg, u);

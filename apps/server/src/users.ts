@@ -104,15 +104,66 @@ export class Users {
   }
 
   /** The user and their password hash, for checking a login. */
-  async credentials(username: string): Promise<{ user: UserRow; passwordHash: string } | null> {
-    const r = await this.db.query<UserRow & { password_hash: string }>(
-      `SELECT ${USER_COLUMNS}, password_hash FROM users WHERE lower(username) = lower($1)`,
+  async credentials(username: string): Promise<{ user: UserRow; passwordHash: string; banned: boolean } | null> {
+    const r = await this.db.query<UserRow & { password_hash: string; banned_at: Date | null }>(
+      `SELECT ${USER_COLUMNS}, password_hash, banned_at FROM users WHERE lower(username) = lower($1) AND deleted_at IS NULL`,
       [username],
     );
     const row = r.rows[0];
     if (!row) return null;
-    const { password_hash, ...user } = row;
-    return { user, passwordHash: password_hash };
+    const { password_hash, banned_at, ...user } = row;
+    return { user, passwordHash: password_hash, banned: !!banned_at };
+  }
+
+  /** The password hash of a user, for confirming a step such as leaving. */
+  async passwordHash(id: string): Promise<string | null> {
+    const r = await this.db.query<{ password_hash: string }>('SELECT password_hash FROM users WHERE id = $1 AND deleted_at IS NULL', [id]);
+    return r.rows[0]?.password_hash ?? null;
+  }
+
+  /**
+   * Leaving: the games stay (the opponents keep their records) but nothing personal does. The name becomes
+   * "退会したユーザー", the login name is freed, and picture, messages, follows, blocks and sessions are removed.
+   * Returns the picture id, for removing its files.
+   */
+  async deleteAccount(id: string): Promise<string | null> {
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+      const r = await client.query<{ avatar_id: string | null }>('SELECT avatar_id FROM users WHERE id = $1 FOR UPDATE', [id]);
+      await client.query(
+        `UPDATE users SET username = 'deleted_' || id, display_name = '退会したユーザー', password_hash = '!', avatar_id = NULL,
+           declared_rank = NULL, allow_recording = false, deleted_at = now()
+         WHERE id = $1`,
+        [id],
+      );
+      for (const q of [
+        'DELETE FROM sessions WHERE user_id = $1',
+        'DELETE FROM follows WHERE follower_id = $1 OR followee_id = $1',
+        'DELETE FROM blocks WHERE blocker_id = $1 OR blocked_id = $1',
+        'DELETE FROM direct_messages WHERE from_id = $1 OR to_id = $1',
+        'DELETE FROM lobby_messages WHERE user_id = $1',
+      ]) {
+        await client.query(q, [id]);
+      }
+      await client.query('COMMIT');
+      return r.rows[0]?.avatar_id ?? null;
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Suspends (or restores) an account. A suspended one is logged out everywhere and cannot log in. */
+  async setBanned(id: string, banned: boolean): Promise<boolean> {
+    const r = await this.db.query(
+      `UPDATE users SET banned_at = ${banned ? 'now()' : 'NULL'} WHERE id = $1 AND bot IS NULL AND role <> 'admin'`,
+      [id],
+    );
+    if (banned) await this.db.query('DELETE FROM sessions WHERE user_id = $1', [id]);
+    return !!r.rowCount;
   }
 
   async byId(id: string): Promise<UserRow | null> {
@@ -133,7 +184,7 @@ export class Users {
     if (!token) return null;
     const r = await this.db.query<UserRow>(
       `SELECT ${USER_COLUMNS.split(', ').map((c) => `u.${c}`).join(', ')} FROM sessions s JOIN users u ON u.id = s.user_id
-       WHERE s.token_hash = $1 AND s.expires_at > now()`,
+       WHERE s.token_hash = $1 AND s.expires_at > now() AND u.deleted_at IS NULL AND u.banned_at IS NULL`,
       [hashToken(token)],
     );
     return r.rows[0] ?? null;

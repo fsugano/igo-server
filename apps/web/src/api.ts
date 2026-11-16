@@ -1,4 +1,4 @@
-import type { NewsItem, AppSettings, ClockSettings, GameSettings, Move, PlayStyle, PlayerRecord, PublicUser, RECORDING_METHODS, RecordingMethod, Role } from '@igo/shared';
+import type { NewsItem, Report, ReportReason, ReportTarget, AppSettings, ClockSettings, GameSettings, Move, PlayStyle, PlayerRecord, PublicUser, RECORDING_METHODS, RecordingMethod, Role } from '@igo/shared';
 
 export class ApiError extends Error {}
 
@@ -96,6 +96,12 @@ export const api = {
       method: id ? 'PATCH' : 'POST',
       body: JSON.stringify(n),
     }),
+  report: (r: { targetType: ReportTarget; targetId: string; reason: ReportReason; detail?: string }) =>
+    request<{ ok: true }>('/api/reports', { method: 'POST', body: JSON.stringify(r) }),
+  deleteAccount: (password: string) => request<{ ok: true }>('/api/me', { method: 'DELETE', body: JSON.stringify({ password }) }),
+  adminReports: (status: 'open' | 'closed') => request<{ reports: Report[] }>(`/api/admin/reports?status=${status}`),
+  resolveReport: (id: string, action: string) =>
+    request<{ ok: true }>(`/api/admin/reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action }) }),
   deleteNews: (id: string) => request<{ ok: true }>(`/api/admin/news/${id}`, { method: 'DELETE' }),
   setAllowRecording: (allowRecording: boolean) =>
     request<{ account: Account }>('/api/me/settings', { method: 'PATCH', body: JSON.stringify({ allowRecording }) }),
@@ -176,6 +182,13 @@ const ERRORS: Record<string, string> = {
   image_too_large: '画像は5MBまでです',
   invalid_news: 'タイトル（100文字まで）・本文・日時を確認してください。掲載終了は公開より後にしてください',
   not_found: '見つかりません',
+  user_unavailable: 'この人とはやり取りできません',
+  account_suspended: 'このアカウントは利用停止中です。お問い合わせください',
+  bad_password: 'パスワードが違います',
+  in_game: '対局中は退会できません。対局が終わってからお試しください',
+  no_such_target: '通報する対象が見つかりません（削除されたかもしれません）',
+  no_such_user: 'その人は見つかりません',
+  cannot_ban: 'この人は利用停止にできません',
   offline: '接続されていません。インターネットへの接続を確かめてください',
 };
 

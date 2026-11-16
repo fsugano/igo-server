@@ -43,7 +43,7 @@ beforeAll(async () => {
   await db.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
   await migrate(db);
   const engines = [new BuiltinEngine(BUILTIN_LEVELS[0], 1), stub];
-  const { app } = await buildApp({ ...loadConfig({}), databaseUrl: url, uploadDir: mkdtempSync(join(tmpdir(), 'igo-uploads-')) }, db, { engines, moveDelayMs: 0, aiVsAiDelayMs: 0 });
+  const { app } = await buildApp({ ...loadConfig({}), databaseUrl: url, uploadDir: mkdtempSync(join(tmpdir(), 'igo-uploads-')) }, db, { engines, moveDelayMs: 0, aiVsAiDelayMs: 0, authPerMinute: 100 });
   await app.listen({ port: 0, host: '127.0.0.1' });
   base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   close = async () => {
@@ -619,5 +619,82 @@ describe('news', () => {
     expect((await send('DELETE', `/api/admin/news/${later.item.id}`, admin)).status).toBe(200);
     const audit = await db.query("SELECT action FROM admin_audit WHERE action LIKE 'news.%' ORDER BY id");
     expect(audit.rows.map((r) => r.action)).toEqual(['news.create', 'news.create', 'news.update', 'news.delete']);
+  });
+});
+
+describe('blocks, reports and leaving', () => {
+  const post = (path: string, cookie: string, body: object, method = 'POST') =>
+    fetch(`${base}${path}`, { method, headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+  it('stops challenges and messages between people when one blocks the other', async () => {
+    const a = await register('blocker');
+    const b = await register('pest');
+    const sa = await connect(a.cookie);
+    const sb = await connect(b.cookie);
+    await emit(sa, 'lobby:join');
+    expect((await emit(sb, 'follow:set', a.user.id, true)).ok).toBe(true);
+    expect((await emit(sa, 'block:set', b.user.id, true)).ok).toBe(true);
+    expect((await emit(sa, 'block:list')).ids).toEqual([b.user.id]);
+    // The follow ended, and nothing reaches the blocker.
+    expect((await emit(sb, 'follow:list')).ids).toEqual([]);
+    expect((await emit(sb, 'follow:set', a.user.id, true)).error).toBe('user_unavailable');
+    expect((await emit(sb, 'dm:send', a.user.id, 'hey')).error).toBe('user_unavailable');
+    expect((await emit(sb, 'challenge:create', a.user.id, seek)).error).toBe('user_unavailable');
+    expect((await emit(sa, 'block:set', b.user.id, false)).ok).toBe(true);
+    expect((await emit(sb, 'dm:send', a.user.id, 'sorry')).ok).toBe(true);
+  });
+
+  it('takes reports, and lets an admin remove a message and suspend the writer', async () => {
+    const admin = await login('alice'); // made admin in the news test
+    const reporter = await login('blocker');
+    const writer = await login('pest');
+    const sw = await connect(writer);
+    await emit(sw, 'lobby:join');
+    const heard = nextEvent<any>(sw, 'lobbychat:message');
+    expect((await emit(sw, 'lobbychat:send', 'ひどい言葉')).ok).toBe(true);
+    const msg = await heard;
+
+    expect((await post('/api/reports', reporter, { targetType: 'lobbychat', targetId: msg.id, reason: 'nope' })).status).toBe(400);
+    expect((await post('/api/reports', writer, { targetType: 'lobbychat', targetId: msg.id, reason: 'harassment' })).status).toBe(400);
+    expect((await post('/api/reports', reporter, { targetType: 'lobbychat', targetId: '999999', reason: 'harassment' })).status).toBe(404);
+    expect((await post('/api/reports', reporter, { targetType: 'lobbychat', targetId: msg.id, reason: 'harassment', detail: '何度も' })).status).toBe(200);
+
+    expect((await fetch(`${base}/api/admin/reports`, { headers: { cookie: reporter } })).status).toBe(403);
+    const open = (await (await fetch(`${base}/api/admin/reports`, { headers: { cookie: admin } })).json()).reports;
+    const r = open.find((x: any) => x.targetId === msg.id);
+    expect(r).toMatchObject({ snapshot: 'ひどい言葉', reason: 'harassment', targetUser: { username: 'pest' } });
+
+    expect((await post(`/api/admin/reports/${r.id}/resolve`, admin, { action: 'delete_message' })).status).toBe(200);
+    const chat = (await emit(sw, 'lobby:join')).chat;
+    expect(chat.some((m: any) => m.id === msg.id)).toBe(false);
+
+    const closed = new Promise<void>((res) => sw.on('disconnect', () => res()));
+    expect((await post('/api/reports', reporter, { targetType: 'user', targetId: r.targetUser.id, reason: 'harassment' })).status).toBe(200);
+    const again = (await (await fetch(`${base}/api/admin/reports`, { headers: { cookie: admin } })).json()).reports;
+    expect((await post(`/api/admin/reports/${again[again.length - 1].id}/resolve`, admin, { action: 'ban' })).status).toBe(200);
+    await closed;
+    expect((await (await fetch(`${base}/api/me`, { headers: { cookie: writer } })).json()).user).toBeNull();
+    const relogin = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'pest', password: 'password123' }),
+    });
+    expect((await relogin.json()).error).toBe('account_suspended');
+  });
+
+  it('deletes an account but keeps its games under a neutral name', async () => {
+    const { cookie, user } = await register('leaver');
+    const s = await connect(cookie);
+    const g = await emit(s, 'ai:start', { ...ai, black: null, white: 'stub' });
+    expect((await post('/api/me', cookie, { password: 'password123' }, 'DELETE')).status).toBe(409);
+    await emit(s, 'game:join', g.gameId);
+    await emit(s, 'game:resign', g.gameId);
+    expect((await post('/api/me', cookie, { password: 'wrong-password' }, 'DELETE')).status).toBe(401);
+    expect((await post('/api/me', cookie, { password: 'password123' }, 'DELETE')).status).toBe(200);
+    expect((await (await fetch(`${base}/api/me`, { headers: { cookie } })).json()).user).toBeNull();
+    const game = await (await fetch(`${base}/api/games/${g.gameId}`)).json();
+    expect(game.black).toMatchObject({ id: user.id, displayName: '退会したユーザー', username: `deleted_${user.id}` });
+    // The name is free again.
+    expect((await register('leaver')).user.username).toBe('leaver');
   });
 });

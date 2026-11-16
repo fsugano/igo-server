@@ -1,6 +1,6 @@
 import { DECLARABLE_RANKS, DISPLAY_NAME_MAX, checkDisplayName, declaredRankLabel, gamesForLevel } from '@igo/shared';
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { MyProfile, api, errorText } from '../api';
 import { useAuth } from '../auth';
 import { Avatar, LevelBadge } from '../components/UserBits';
@@ -178,6 +178,60 @@ export function SettingsPage() {
           レベルは強さではなく、どれだけ打ったかを表します。4手以上で終局した対局を数えます（AI との対局は1日10局、同じ相手とは1日5局まで）。
         </small>
       </section>
+
+      <LeaveSection />
     </div>
+  );
+}
+
+/** Leaving (deleting the account), with the password asked again. */
+function LeaveSection() {
+  const { setUser } = useAuth();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+
+  const leave = async (e: FormEvent) => {
+    e.preventDefault();
+    setError('');
+    if (!window.confirm('退会すると元に戻せません。本当に退会しますか？')) return;
+    try {
+      await api.deleteAccount(password);
+      setUser(null);
+      navigate('/');
+    } catch (err) {
+      setError(errorText((err as Error).message));
+    }
+  };
+
+  return (
+    <section className="leave">
+      <h3>退会</h3>
+      {!open ? (
+        <button className="link danger" onClick={() => setOpen(true)}>
+          退会の手続きへ
+        </button>
+      ) : (
+        <form className="form" onSubmit={leave}>
+          <p className="meta">
+            退会すると、ニックネーム・画像・メッセージ・フォローは削除され、元に戻せません。対局の記録は相手のために残り、名前は「退会したユーザー」と表示されます。対局中は退会できません。
+          </p>
+          {error && <p className="error">{error}</p>}
+          <label>
+            確認のため、パスワードを入力してください
+            <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+          </label>
+          <div className="buttons">
+            <button type="button" onClick={() => setOpen(false)}>
+              やめる
+            </button>
+            <button className="danger" disabled={!password}>
+              退会する
+            </button>
+          </div>
+        </form>
+      )}
+    </section>
   );
 }

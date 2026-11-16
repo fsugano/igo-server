@@ -18,6 +18,7 @@ import { UpdateNotice } from './pwa';
 import { api } from './api';
 import { NewsPage } from './pages/NewsPage';
 import { AdminNewsPage } from './pages/AdminNewsPage';
+import { AdminReportsPage } from './pages/AdminReportsPage';
 
 export function App() {
   const { user, account, logout } = useAuth();
@@ -114,6 +115,7 @@ export function App() {
           <Route path="/news" element={<NewsPage onOpenList={readNews} />} />
           <Route path="/news/:id" element={<NewsPage />} />
           <Route path="/admin/news" element={<AdminNewsPage />} />
+          <Route path="/admin/reports" element={<AdminReportsPage />} />
           <Route path="/messages/:userId" element={<MessagesPage />} />
           <Route path="*" element={<p className="empty">ページが見つかりません</p>} />
         </Routes>

@@ -14,7 +14,7 @@ export function AdminPage() {
     <div className="admin">
       {account?.role === 'admin' && (
         <p className="notice admin-links">
-          <Link to="/admin/news">お知らせの管理</Link>
+          <Link to="/admin/news">お知らせの管理</Link> · <Link to="/admin/reports">通報の確認</Link>
         </p>
       )}
       <SettingsCard canEdit={account?.role === 'admin'} />
