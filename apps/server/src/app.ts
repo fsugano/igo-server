@@ -12,6 +12,7 @@ import {
   PublicUser,
   RECORDING_METHODS,
   Role,
+  SeekRequest,
   ServerToClientEvents,
   StatsGame,
   WHITE,
@@ -29,7 +30,9 @@ import { Engine, loadEngines } from './ai/index.js';
 import type { Config } from './config.js';
 import type { Db } from './db.js';
 import { BotOptions, GameService, LiveGame, buildSgf, copyGame } from './games.js';
+import { Challenges } from './challenges.js';
 import { Lobby, aiGameSchema, validHandicap } from './lobby.js';
+import { LobbyChat } from './lobby-chat.js';
 import { Settings } from './settings.js';
 import { EventLimiter, originAllowed } from './socket-guard.js';
 import { UserRow, Users, dummyHash, toPublicUser, userJson, verifyPassword } from './users.js';
@@ -95,6 +98,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
 
   const users = new Users(db);
   const lobby = new Lobby();
+  const lobbyChat = new LobbyChat(db);
   const settings = new Settings(db);
   await settings.load();
 
@@ -164,7 +168,19 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       io.to('lobby').emit('lobby:state', lobbyState());
     }, 100);
   };
-  const lobbyState = () => lobby.state([...games.live.values()].map((g) => games.summary(g)));
+  const lobbyState = () =>
+    lobby.state(
+      [...games.live.values()].map((g) => games.summary(g)),
+      (userId) => {
+        const g = userInGame(userId);
+        return g && { gameId: g.id, vsBot: g.black.bot || g.white.bot };
+      },
+    );
+
+  const challenges = new Challenges({
+    received: (c) => io.to(userRoom(c.to.id)).to(userRoom(c.from.id)).emit('challenge:received', c),
+    updated: (c, u) => io.to(userRoom(c.to.id)).to(userRoom(c.from.id)).emit('challenge:updated', u),
+  });
 
   const games: GameService = new GameService(db, {
     update: (g) => {
@@ -476,9 +492,10 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
           });
       };
 
-    socket.on('lobby:join', safe((ack) => {
+    socket.on('lobby:join', safe(async (ack) => {
       socket.join('lobby');
-      ack({ ok: true, lobby: lobbyState() });
+      // The chat is for members: visitors who are not logged in do not get it.
+      ack({ ok: true, lobby: lobbyState(), chat: me ? await lobbyChat.recent() : [] });
     }));
     socket.on('lobby:leave', () => void socket.leave('lobby'));
 
@@ -508,33 +525,89 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       if (wanted && starting.has(wanted.creator.id)) return ack({ ok: false, error: 'already_playing' });
       const s = lobby.takeSeek(u.id, String(seekId));
       if (typeof s === 'string') return ack({ ok: false, error: s });
-      // Hold both players until their game exists, so a second accept cannot start another game for either.
-      const held = [u.id, s.creator.id];
-      held.forEach((id) => starting.add(id));
-      let g: LiveGame;
-      try {
-        const [creator, accepter] = await Promise.all([users.byId(s.creator.id), users.byId(u.id)]);
-        if (!creator || !accepter) return ack({ ok: false, error: 'no_such_user' });
-        const creatorBlack = s.color === 'black' || (s.color === 'random' && Math.random() < 0.5);
-        const settings: GameSettings = { size: s.size, komi: s.komi, handicap: s.handicap, ruleset: s.ruleset };
-        g = await games.create({
-          black: creatorBlack ? creator : accepter,
-          white: creatorBlack ? accepter : creator,
-          settings,
-          clock: s.clock,
-          rated: s.rated,
-        });
-      } finally {
-        held.forEach((id) => starting.delete(id));
-      }
-      const creator = s.creator;
-      const accepter = u;
-      // A player in a game should not have other open seeks.
-      for (const [id, other] of lobby.seeks) {
-        if (other.creator.id === creator.id || other.creator.id === accepter.id) lobby.seeks.delete(id);
-      }
-      io.to(userRoom(g.black.id)).to(userRoom(g.white.id)).emit('game:start', g.id);
+      const g = await startGame(s.creator.id, u.id, s);
+      if (typeof g === 'string') return ack({ ok: false, error: g });
       ack({ ok: true, gameId: g.id });
+    }));
+
+    // ---- Challenges: a game offered to one particular person ----
+
+    socket.on('challenge:list', safe((ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      ack({ ok: true, challenges: challenges.list(u.id) });
+    }));
+
+    socket.on('challenge:create', safe((userId, req, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      if (userInGame(u.id) || starting.has(u.id)) return ack({ ok: false, error: 'already_playing' });
+      const target = lobby.onlineUser(String(userId));
+      if (!target) return ack({ ok: false, error: 'user_offline' });
+      if (userInGame(target.id) || starting.has(target.id)) return ack({ ok: false, error: 'opponent_playing' });
+      if (lobby.isBusy(target.id)) return ack({ ok: false, error: 'opponent_busy' });
+      const c = challenges.create(u, target, req);
+      if (typeof c === 'string') return ack({ ok: false, error: c });
+      ack({ ok: true, challenge: c });
+    }));
+
+    socket.on('challenge:cancel', safe((id, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      const r = challenges.cancel(u.id, String(id));
+      ack(r === true ? { ok: true } : { ok: false, error: r });
+    }));
+
+    socket.on('challenge:respond', safe(async (id, answer, detail, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      const d = (detail ?? {}) as { reason?: unknown; request?: unknown };
+      if (answer === 'decline') {
+        const r = challenges.decline(u.id, String(id), typeof d.reason === 'string' ? d.reason : undefined);
+        return ack(r === true ? { ok: true } : { ok: false, error: r });
+      }
+      if (answer === 'counter') {
+        const c = challenges.counter(u.id, String(id), d.request);
+        return ack(typeof c === 'string' ? { ok: false, error: c } : { ok: true, challenge: c });
+      }
+      if (answer !== 'accept') return ack({ ok: false, error: 'invalid_input' });
+      if (userInGame(u.id) || starting.has(u.id)) return ack({ ok: false, error: 'already_playing' });
+      const c = challenges.take(u.id, String(id));
+      if (typeof c === 'string') return ack({ ok: false, error: c });
+      if (!lobby.isOnline(c.from.id)) {
+        challenges.finish(c, { id: c.id, outcome: 'cancelled' });
+        return ack({ ok: false, error: 'user_offline' });
+      }
+      const g = await startGame(c.from.id, u.id, c.request).catch((e) => {
+        challenges.restore(c);
+        throw e;
+      });
+      if (typeof g === 'string') {
+        challenges.restore(c);
+        return ack({ ok: false, error: g === 'already_playing' ? 'opponent_playing' : g });
+      }
+      challenges.finish(c, { id: c.id, outcome: 'accepted', gameId: g.id });
+      ack({ ok: true, gameId: g.id });
+    }));
+
+    // ---- Lobby chat ----
+
+    socket.on('lobbychat:send', safe(async (text, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      if (!socket.rooms.has('lobby')) return ack({ ok: false, error: 'not_in_lobby' });
+      const msg = await lobbyChat.post(u, text);
+      if (!msg) return ack({ ok: false, error: 'invalid_chat' });
+      io.to('lobby').emit('lobbychat:message', msg);
+      ack({ ok: true });
+    }));
+
+    socket.on('presence:setStatus', safe((status, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      if (status !== 'available' && status !== 'busy') return ack({ ok: false, error: 'invalid_input' });
+      lobby.setBusy(u.id, status === 'busy');
+      ack({ ok: true });
       broadcastLobby();
     }));
 
@@ -579,7 +652,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
         if (people === 1) starting.delete(u.id);
       }
       if (people === 1) {
-        for (const [id, s] of lobby.seeks) if (s.creator.id === u.id) lobby.seeks.delete(id);
+        clearWaiting(u.id);
         botSay(g.id, r.black ? g.black : g.white, LINES.greeting);
       }
       ack({ ok: true, gameId: g.id });
@@ -638,7 +711,10 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
 
     socket.on('disconnect', () => {
       if (!me) limiter.forget(limitKey);
-      if (me && lobby.disconnect(me.id)) broadcastLobby();
+      if (me && lobby.disconnect(me.id)) {
+        challenges.dropUser(me.id);
+        broadcastLobby();
+      }
     });
   });
 
@@ -684,8 +760,46 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
   /** People whose game is being created right now (between the checks and the game existing). */
   const starting = new Set<string>();
 
+  /** A player in a game should not have open seeks or challenges. */
+  function clearWaiting(userId: string) {
+    for (const [id, s] of lobby.seeks) if (s.creator.id === userId) lobby.seeks.delete(id);
+    challenges.dropUser(userId);
+  }
+
+  /**
+   * Starts a game between two people on conditions one of them (the offerer) set; the colour is from the offerer's side.
+   * Returns an error code if either is already playing or starting a game.
+   */
+  async function startGame(offererId: string, otherId: string, s: SeekRequest): Promise<LiveGame | string> {
+    if ([offererId, otherId].some((id) => starting.has(id) || userInGame(id))) return 'already_playing';
+    // Hold both players until their game exists, so a second accept cannot start another game for either.
+    const held = [offererId, otherId];
+    held.forEach((id) => starting.add(id));
+    let g: LiveGame;
+    try {
+      const [offerer, other] = await Promise.all([users.byId(offererId), users.byId(otherId)]);
+      if (!offerer || !other) return 'no_such_user';
+      const offererBlack = s.color === 'black' || (s.color === 'random' && Math.random() < 0.5);
+      const settings: GameSettings = { size: s.size, komi: s.komi, handicap: s.handicap, ruleset: s.ruleset };
+      g = await games.create({
+        black: offererBlack ? offerer : other,
+        white: offererBlack ? other : offerer,
+        settings,
+        clock: s.clock,
+        rated: s.rated,
+      });
+    } finally {
+      held.forEach((id) => starting.delete(id));
+    }
+    held.forEach(clearWaiting);
+    io.to(userRoom(g.black.id)).to(userRoom(g.white.id)).emit('game:start', g.id);
+    broadcastLobby();
+    return g;
+  }
+
   // Expired sessions would otherwise pile up in the table.
-  const sweep = () => void users.deleteExpiredSessions().catch((e) => app.log.error(e));
+  const sweep = () =>
+    void Promise.all([users.deleteExpiredSessions(), lobbyChat.deleteOld()]).catch((e) => app.log.error(e));
   sweep();
   const sweepTimer = setInterval(sweep, SESSION_SWEEP_MS);
   sweepTimer.unref();
@@ -697,10 +811,11 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
 
   app.addHook('onClose', async () => {
     clearInterval(sweepTimer);
+    challenges.stop();
     gauge.stop();
     games.stop();
     io.close();
   });
 
-  return { app, io, games, lobby, settings };
+  return { app, io, games, lobby, settings, challenges };
 }

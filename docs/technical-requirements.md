@@ -201,7 +201,13 @@
 
 | イベント | 引数 | ログイン | 説明 |
 |---|---|---|---|
-| `lobby:join` / `lobby:leave` | — | 不要 | ロビーの配信を受け取る／やめる |
+| `lobby:join` / `lobby:leave` | — | 不要 | ロビーの配信を受け取る／やめる。`lobby:join` はロビーのチャットの直近100件も返す（ログインしていない人には空） |
+| `lobbychat:send` | `text` | 必要 | ロビーのチャットに送る（300文字まで、ロビーを開いている人だけ） |
+| `presence:setStatus` | `'available' \| 'busy'` | 必要 | 申し込みを受け付ける／受け付けない（取り込み中）を切り替える |
+| `challenge:create` | `userId, ChallengeRequest` | 必要 | 相手を指定して対局を申し込む（60秒で期限切れ） |
+| `challenge:respond` | `challengeId, 'accept' \| 'decline' \| 'counter', { reason?, request? }` | 必要 | 受ける／断る（定型文の理由つき）／条件を変えて返す（1回まで） |
+| `challenge:cancel` | `challengeId` | 必要 | 自分の申し込みを取り消す |
+| `challenge:list` | — | 必要 | 自分宛て・自分からの未決の申し込み（再読み込みの後など） |
 | `seek:create` | `SeekRequest` | 必要 | 募集を出す |
 | `seek:cancel` | `seekId` | 必要 | 自分の募集を取り消す |
 | `seek:accept` | `seekId` | 必要 | 募集を受けて対局を始める |
@@ -220,7 +226,10 @@
 
 | イベント | 内容 |
 |---|---|
-| `lobby:state` | `LobbyState`（募集・対局中・オンライン） |
+| `lobby:state` | `LobbyState`（募集・対局中・オンライン。オンラインの人には状態 `available` / `playing` / `playing_ai` / `busy` と対局中の `gameId` が付く） |
+| `lobbychat:message` | ロビーのチャット 1件 |
+| `challenge:received` | 申し込み（自分宛てと自分から出したもの） |
+| `challenge:updated` | 申し込みの結果：`accepted`（`gameId` 付き）／`declined`（理由付き）／`expired`／`cancelled`／`countered`（返された申し込み付き） |
 | `game:start` | 自分の対局が始まった（`gameId`） |
 | `game:update` | `GameView`（盤面・持ち時間・サーバー時刻・チャットなど） |
 | `game:chat` | 新しいチャット 1件 |
@@ -877,6 +886,9 @@ flowchart LR
 - 対局の生配信（ライブ配信）への対応（観戦者向けの遅延表示の仕組み（F-GAUGE-11）をそのまま使える）
 
 ### 8.7 ロビーの刷新（オンラインユーザー一覧・チャット・対局の申し込み）
+
+> **実装状況（第1段）**：ユーザーカードの一覧（状態つき、名前と「対局できる人だけ」で絞り込み、先頭に AI）、プロフィールのシート（対局を申し込む・観戦する・プロフィールを見る）、相手を指定した申し込み（F-SOC-CH-01〜07・09、CH-08 は「取り込み中」の切り替えのみ）、ロビーのチャット（ログインした人だけ読み書き、7日で削除）を実装済みです。
+> まだのもの：1対1のチャット、フォロー、ブロック・通報、離席中の自動判定、差分配信と仮想スクロール、定型文ボタン、禁止語、「オンラインを表示しない」設定。
 
 #### 目的
 

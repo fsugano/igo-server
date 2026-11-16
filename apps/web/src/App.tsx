@@ -2,6 +2,7 @@ import { canBroadcast } from '@igo/shared';
 import { useEffect } from 'react';
 import { Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from './auth';
+import { ChallengeCenter } from './components/ChallengeCenter';
 import { AdminPage } from './pages/AdminPage';
 import { BroadcastPage } from './pages/BroadcastPage';
 import { GamePage } from './pages/GamePage';
@@ -67,6 +68,7 @@ export function App() {
           <Route path="*" element={<p className="empty">ページが見つかりません</p>} />
         </Routes>
       </main>
+      <ChallengeCenter />
     </div>
   );
 }

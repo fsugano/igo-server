@@ -86,6 +86,8 @@ button.link { border: none; background: none; color: var(--accent); padding: 0; 
 .form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); flex: 1; }
 .form label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--text); }
 .form .row { display: flex; gap: 10px; }
+.form .row > label { min-width: 0; }
+.form .row select, .form .row input { width: 100%; min-width: 0; box-sizing: border-box; }
 .form small { color: var(--muted); margin-top: -6px; }
 input, select {
   font: inherit;
@@ -340,3 +342,88 @@ input, select {
 .style-axes .bar { position: relative; height: 8px; border-radius: 4px; background: var(--line); }
 .style-axes .mark { position: absolute; top: 50%; width: 14px; height: 14px; border-radius: 50%; background: currentColor; transform: translate(-50%, -50%); }
 .traits { margin: 0; padding-left: 1.2em; }
+
+/* ---- Lobby: people, challenges, chat ---- */
+.lobby-tabs button { font-size: 14px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-bottom: 12px; font-size: 14px; }
+.toolbar input[type='search'] {
+  flex: 1 1 160px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.toolbar label.check { display: flex; align-items: center; gap: 6px; }
+.people { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
+.person {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  text-align: left;
+  border-radius: 10px;
+}
+.person.me { border-style: dashed; }
+.person.ai { background: color-mix(in srgb, var(--accent) 8%, var(--card)); }
+.person .who { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.person .who strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.person .who small { color: var(--muted); }
+.avatar {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 14px;
+  background: var(--wood);
+  color: var(--wood-line);
+}
+.avatar.large { width: 56px; height: 56px; font-size: 22px; }
+.presence { font-size: 12px; padding: 2px 8px; border-radius: 99px; white-space: nowrap; border: 1px solid var(--line); color: var(--muted); }
+.presence.available { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, transparent); }
+.presence.playing, .presence.playing_ai { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgb(0 0 0 / 0.45);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+.dialog { width: min(440px, 100%); max-height: calc(100vh - 32px); overflow: auto; margin: 0; box-shadow: 0 10px 40px rgb(0 0 0 / 0.3); }
+.dialog-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.dialog-head h2 { margin: 0 0 12px; }
+.dialog .close { font-size: 22px; line-height: 1; color: var(--muted); }
+.sheet-head { display: flex; gap: 14px; align-items: center; margin-bottom: 14px; }
+.sheet-head > div { display: flex; flex-direction: column; gap: 4px; }
+.dialog .buttons, .form .buttons { justify-content: flex-end; margin-top: 8px; }
+.buttons.stack { flex-direction: column; align-items: stretch; }
+.buttons.stack .button { text-align: center; }
+.conditions { font-weight: 600; }
+
+.toasts { position: fixed; right: 16px; bottom: 16px; z-index: 40; display: flex; flex-direction: column; gap: 8px; max-width: calc(100vw - 32px); }
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px 14px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.15);
+  font-size: 14px;
+}
+
+.lobby-chat .chat-log { height: 260px; overflow-y: auto; font-size: 14px; border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; background: var(--bg); }
+.lobby-chat .chat-log p { margin: 6px 0; overflow-wrap: anywhere; }
+.lobby-chat time { color: var(--muted); font-size: 12px; margin-left: 6px; }
+.chat-input { display: flex; gap: 6px; margin-top: 8px; }
+.chat-input input { flex: 1; min-width: 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }

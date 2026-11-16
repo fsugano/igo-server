@@ -84,16 +84,74 @@ export interface GameView {
   ratingChange?: { black: number; white: number } | null;
 }
 
+/** What someone in the online list is doing. */
+export type PresenceStatus = 'available' | 'playing' | 'playing_ai' | 'busy';
+
+export interface OnlineUser extends PublicUser {
+  status: PresenceStatus;
+  /** The game being played, for "watch". */
+  gameId?: string;
+}
+
 export interface LobbyState {
   seeks: Seek[];
   games: GameSummary[];
-  online: PublicUser[];
+  online: OnlineUser[];
+}
+
+/** A game offered to one particular person. The colour is from the challenger's side. */
+export type ChallengeRequest = SeekRequest;
+
+export interface Challenge {
+  id: string;
+  from: PublicUser;
+  to: PublicUser;
+  request: ChallengeRequest;
+  /** Server time (ms) when it lapses. */
+  expiresAt: number;
+  /** Set on a counter-offer: the challenge it answers. A counter-offer cannot be countered again. */
+  counterOf?: string;
+}
+
+export type ChallengeOutcome = 'accepted' | 'declined' | 'expired' | 'cancelled' | 'countered';
+
+export interface ChallengeUpdate {
+  id: string;
+  outcome: ChallengeOutcome;
+  /** Set phrase given when declining. */
+  reason?: string;
+  gameId?: string;
+  /** The counter-offer that replaced it. */
+  counter?: Challenge;
+}
+
+/** Set phrases for declining (free text is not allowed, so nothing rude can be sent this way). */
+export const DECLINE_REASONS = ['今は打てません', '持ち時間が合いません', '盤の大きさが合いません', 'また今度お願いします'] as const;
+
+export interface LobbyChatMessage {
+  id: string;
+  user: PublicUser;
+  text: string;
+  at: number;
 }
 
 export type Ack<T = {}> = (res: ({ ok: true } & T) | { ok: false; error: string }) => void;
 
 export interface ClientToServerEvents {
-  'lobby:join': (ack: Ack<{ lobby: LobbyState }>) => void;
+  /** The chat history comes only to logged-in users. */
+  'lobby:join': (ack: Ack<{ lobby: LobbyState; chat: LobbyChatMessage[] }>) => void;
+  'lobbychat:send': (text: string, ack: Ack) => void;
+  'presence:setStatus': (status: 'available' | 'busy', ack: Ack) => void;
+  'challenge:create': (userId: string, req: ChallengeRequest, ack: Ack<{ challenge: Challenge }>) => void;
+  'challenge:respond': (
+    challengeId: string,
+    answer: 'accept' | 'decline' | 'counter',
+    detail: { reason?: string; request?: ChallengeRequest },
+    ack: Ack<{ gameId?: string; challenge?: Challenge }>,
+  ) => void;
+  'challenge:cancel': (challengeId: string, ack: Ack) => void;
+  /** Challenges to and from me still open (e.g. after reloading the page). */
+  'challenge:list': (ack: Ack<{ challenges: Challenge[] }>) => void;
   'lobby:leave': () => void;
   'seek:create': (req: SeekRequest, ack: Ack<{ seek: Seek }>) => void;
   'seek:cancel': (seekId: string, ack: Ack) => void;
@@ -116,6 +174,9 @@ export interface ClientToServerEvents {
 
 export interface ServerToClientEvents {
   'lobby:state': (lobby: LobbyState) => void;
+  'lobbychat:message': (msg: LobbyChatMessage) => void;
+  'challenge:received': (challenge: Challenge) => void;
+  'challenge:updated': (update: ChallengeUpdate) => void;
   'game:start': (gameId: string) => void;
   'game:update': (game: GameView) => void;
   'game:chat': (gameId: string, msg: ChatMessage) => void;

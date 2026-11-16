@@ -72,6 +72,29 @@ async function connect(cookie?: string): Promise<Client> {
 const emit = <T = any>(s: Client, ev: string, ...args: unknown[]): Promise<T> =>
   new Promise((r) => (s.emit as any)(ev, ...args, r));
 
+/** Logs in an account made by an earlier test (sign-ups are limited per address). */
+async function login(username: string) {
+  const res = await fetch(`${base}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username, password: 'password123' }),
+  });
+  expect(res.status).toBe(200);
+  return res.headers.get('set-cookie')!.split(';')[0];
+}
+
+/** The next event of this kind that passes the test. */
+const nextEvent = <T = any>(s: Client, ev: string, pred: (x: T) => boolean = () => true) =>
+  new Promise<T>((r) => {
+    const h = (x: T) => {
+      if (pred(x)) {
+        (s as any).off(ev, h);
+        r(x);
+      }
+    };
+    (s as any).on(ev, h);
+  });
+
 const nextUpdate = (s: Client, pred: (g: GameView) => boolean = () => true) =>
   new Promise<GameView>((r) => {
     const h = (g: GameView) => {
@@ -352,15 +375,6 @@ describe('protection', () => {
   });
 
   it('starts only one game when the same person accepts two seeks at once', async () => {
-    const login = async (username: string) => {
-      const res = await fetch(`${base}/api/auth/login`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ username, password: 'password123' }),
-      });
-      expect(res.status).toBe(200);
-      return res.headers.get('set-cookie')!.split(';')[0];
-    };
     // Players from earlier tests whose games have ended.
     const sa = await connect(await login('quitter'));
     const sb = await connect(await login('winner'));
@@ -373,5 +387,75 @@ describe('protection', () => {
     const started = results.find((r) => r.ok)!;
     await emit(sa, 'game:join', started.gameId);
     expect((await emit(sa, 'game:resign', started.gameId)).ok).toBe(true);
+  });
+});
+
+describe('lobby', () => {
+  it('offers a game to one person: decline, cooldown, busy, counter-offer and accept', async () => {
+    const sa = await connect(await login('alice'));
+    const sb = await connect(await login('black1'));
+    const sc = await connect(await login('slowpoke'));
+    const ids: Record<string, string> = {};
+    for (const [s, n] of [[sa, 'alice'], [sb, 'black1'], [sc, 'slowpoke']] as const) {
+      const j = await emit(s, 'lobby:join');
+      ids[n] = j.lobby.online.find((u: any) => u.username === n).id;
+    }
+
+    const got = nextEvent<any>(sb, 'challenge:received');
+    const made = await emit(sa, 'challenge:create', ids.black1, seek);
+    expect(made.ok).toBe(true);
+    expect((await got).from.username).toBe('alice');
+    expect((await emit(sa, 'challenge:create', ids.slowpoke, seek)).error).toBe('challenge_pending');
+    expect((await emit(sa, 'challenge:create', ids.alice, seek)).error).toBe('own_challenge');
+    expect((await emit(sb, 'challenge:list')).challenges).toHaveLength(1);
+
+    const declined = nextEvent<any>(sa, 'challenge:updated');
+    expect((await emit(sa, 'challenge:respond', made.challenge.id, 'decline', {})).error).toBe('not_your_challenge');
+    expect((await emit(sb, 'challenge:respond', made.challenge.id, 'decline', { reason: '今は打てません' })).ok).toBe(true);
+    expect(await declined).toMatchObject({ outcome: 'declined', reason: '今は打てません' });
+    expect((await emit(sa, 'challenge:create', ids.black1, seek)).error).toBe('challenge_cooldown');
+
+    expect((await emit(sc, 'presence:setStatus', 'busy')).ok).toBe(true);
+    expect((await emit(sa, 'challenge:create', ids.slowpoke, seek)).error).toBe('opponent_busy');
+    const state = await nextEvent<any>(sa, 'lobby:state', (l) => l.online.some((u: any) => u.status === 'busy'));
+    expect(state.online.find((u: any) => u.username === 'slowpoke').status).toBe('busy');
+    expect((await emit(sc, 'presence:setStatus', 'available')).ok).toBe(true);
+
+    // slowpoke offers black on 9x9; alice answers with 13x13, taking white herself.
+    const first = await emit(sc, 'challenge:create', ids.alice, seek);
+    const countered = nextEvent<any>(sc, 'challenge:updated');
+    const counter = await emit(sa, 'challenge:respond', first.challenge.id, 'counter', { request: { ...seek, size: 13, color: 'white' } });
+    expect(counter.ok).toBe(true);
+    expect((await countered).outcome).toBe('countered');
+    expect((await emit(sc, 'challenge:respond', counter.challenge.id, 'counter', { request: seek })).error).toBe('counter_once');
+
+    const started = nextEvent<string>(sa, 'game:start');
+    const accepted = await emit(sc, 'challenge:respond', counter.challenge.id, 'accept', {});
+    expect(accepted.ok).toBe(true);
+    expect(await started).toBe(accepted.gameId);
+    const joined = await emit(sa, 'game:join', accepted.gameId);
+    expect(joined.game.state.settings.size).toBe(13);
+    expect(joined.game.white.username).toBe('alice');
+    const playing = await nextEvent<any>(sb, 'lobby:state', (l) => l.online.some((u: any) => u.status === 'playing'));
+    expect(playing.online.find((u: any) => u.username === 'alice')).toMatchObject({ status: 'playing', gameId: accepted.gameId });
+    // Someone in a game cannot be challenged.
+    expect((await emit(sb, 'challenge:create', ids.alice, seek)).error).toBe('opponent_playing');
+    expect((await emit(sa, 'game:resign', accepted.gameId)).ok).toBe(true);
+  });
+
+  it('keeps a lobby chat for members', async () => {
+    const guest = await connect();
+    expect((await emit(guest, 'lobby:join')).chat).toEqual([]);
+    expect((await emit(guest, 'lobbychat:send', 'hello')).error).toBe('login_required');
+
+    const s = await connect(await login('alice'));
+    expect((await emit(s, 'lobbychat:send', 'hi')).error).toBe('not_in_lobby');
+    await emit(s, 'lobby:join');
+    const heard = nextEvent<any>(guest, 'lobbychat:message');
+    expect((await emit(s, 'lobbychat:send', '  よろしくお願いします  ')).ok).toBe(true);
+    expect((await heard).text).toBe('よろしくお願いします');
+    expect((await emit(s, 'lobbychat:send', '   ')).error).toBe('invalid_chat');
+    const again = await emit(s, 'lobby:join');
+    expect(again.chat.at(-1)).toMatchObject({ text: 'よろしくお願いします', user: { username: 'alice' } });
   });
 });

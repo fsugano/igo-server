@@ -104,6 +104,19 @@ const ERRORS: Record<string, string> = {
   invalid_settings: '設定の値が正しくありません',
   players_cannot_watch_gauge: '対局者は対局中に形勢ゲージを見られません',
   no_such_game: 'その対局は終わったか、見つかりません',
+  invalid_chat: 'メッセージを入力してください',
+  not_in_lobby: 'ロビーを開き直してください',
+  user_offline: 'その人はオフラインになりました',
+  opponent_playing: 'その人は対局中です',
+  opponent_busy: 'その人は今、申し込みを受け付けていません',
+  own_challenge: '自分には申し込めません',
+  invalid_target: 'AIとは「人対AI」から対局できます',
+  challenge_pending: '申し込みは一度に1件までです。返事を待つか取り消してください',
+  challenge_waiting_for_you: 'その人からの申し込みが届いています。先に返事をしてください',
+  challenge_cooldown: '断られた相手には5分間申し込めません',
+  no_such_challenge: 'その申し込みは締め切られました',
+  not_your_challenge: 'この申し込みには返事できません',
+  counter_once: '条件の変更は1回までです',
 };
 
 export const errorText = (code: string) => ERRORS[code] ?? code;
