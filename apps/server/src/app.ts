@@ -34,6 +34,7 @@ import { Challenges } from './challenges.js';
 import { Lobby, aiGameSchema, validHandicap } from './lobby.js';
 import { LobbyChat } from './lobby-chat.js';
 import { Settings } from './settings.js';
+import { Social } from './social.js';
 import { EventLimiter, originAllowed } from './socket-guard.js';
 import { UserRow, Users, dummyHash, toPublicUser, userJson, verifyPassword } from './users.js';
 
@@ -99,6 +100,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
   const users = new Users(db);
   const lobby = new Lobby();
   const lobbyChat = new LobbyChat(db);
+  const social = new Social(db);
   const settings = new Settings(db);
   await settings.load();
 
@@ -363,8 +365,11 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
        WHERE g.black_id = $1 OR g.white_id = $1 ORDER BY g.started_at DESC LIMIT 50`,
       [u.id],
     );
+    const viewer = await currentUser(req);
     return {
       user: toPublicUser(u),
+      follows: await social.counts(u.id),
+      following: viewer && viewer.id !== u.id ? await social.isFollowing(viewer.id, u.id) : null,
       games: r.rows.map((g) => ({
         id: String(g.id),
         black: g.black,
@@ -602,6 +607,56 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       ack({ ok: true });
     }));
 
+    // ---- Follows and messages between two people ----
+
+    socket.on('follow:list', safe(async (ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      ack({ ok: true, ids: await social.following(u.id) });
+    }));
+
+    socket.on('follow:set', safe(async (userId, follow, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      const err = await social.setFollow(u.id, String(userId), !!follow);
+      ack(err ? { ok: false, error: err } : { ok: true });
+    }));
+
+    socket.on('dm:conversations', safe(async (ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      ack({ ok: true, conversations: await social.conversations(u.id) });
+    }));
+
+    socket.on('dm:history', safe(async (userId, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      const other = await social.recipient(u.id, String(userId));
+      if (typeof other === 'string') return ack({ ok: false, error: other });
+      await social.markRead(u.id, other.id);
+      ack({ ok: true, user: other, messages: await social.history(u.id, other.id) });
+    }));
+
+    socket.on('dm:read', safe(async (userId, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      const id = String(userId);
+      if (!/^\d{1,18}$/.test(id)) return ack({ ok: false, error: 'no_such_user' });
+      await social.markRead(u.id, id);
+      ack({ ok: true });
+    }));
+
+    socket.on('dm:send', safe(async (userId, text, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      const other = await social.recipient(u.id, String(userId));
+      if (typeof other === 'string') return ack({ ok: false, error: other });
+      const msg = await social.send(u.id, other.id, text);
+      if (!msg) return ack({ ok: false, error: 'invalid_chat' });
+      io.to(userRoom(u.id)).to(userRoom(other.id)).emit('dm:message', msg, u);
+      ack({ ok: true, message: msg });
+    }));
+
     socket.on('presence:setStatus', safe((status, ack) => {
       const u = needUser(ack);
       if (!u) return;
@@ -799,7 +854,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
 
   // Expired sessions would otherwise pile up in the table.
   const sweep = () =>
-    void Promise.all([users.deleteExpiredSessions(), lobbyChat.deleteOld()]).catch((e) => app.log.error(e));
+    void Promise.all([users.deleteExpiredSessions(), lobbyChat.deleteOld(), social.deleteOld()]).catch((e) => app.log.error(e));
   sweep();
   const sweepTimer = setInterval(sweep, SESSION_SWEEP_MS);
   sweepTimer.unref();

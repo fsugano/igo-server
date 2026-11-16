@@ -71,7 +71,13 @@ export const api = {
     }),
   logout: () => request('/api/auth/logout', { method: 'POST' }),
   profile: (username: string) =>
-    request<{ user: PublicUser; games: ProfileGame[] }>(`/api/users/${encodeURIComponent(username)}`),
+    request<{
+      user: PublicUser;
+      games: ProfileGame[];
+      follows: { following: number; followers: number };
+      /** Whether I follow them; null when it is me or I am not logged in. */
+      following: boolean | null;
+    }>(`/api/users/${encodeURIComponent(username)}`),
   game: (id: string) => request<GameRecord>(`/api/games/${encodeURIComponent(id)}`),
   stats: (username: string) =>
     request<{ games: number; limit: number; record: PlayerRecord; style: PlayStyle }>(`/api/users/${encodeURIComponent(username)}/stats`),

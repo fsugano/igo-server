@@ -135,6 +135,23 @@ export interface LobbyChatMessage {
   at: number;
 }
 
+export interface DirectMessage {
+  id: string;
+  fromId: string;
+  toId: string;
+  text: string;
+  at: number;
+  /** When the recipient opened it, null while unread. */
+  readAt: number | null;
+}
+
+/** One person I have messages with, for the list of conversations. */
+export interface Conversation {
+  user: PublicUser;
+  last: DirectMessage;
+  unread: number;
+}
+
 export type Ack<T = {}> = (res: ({ ok: true } & T) | { ok: false; error: string }) => void;
 
 export interface ClientToServerEvents {
@@ -153,6 +170,14 @@ export interface ClientToServerEvents {
   /** Challenges to and from me still open (e.g. after reloading the page). */
   'challenge:list': (ack: Ack<{ challenges: Challenge[] }>) => void;
   'lobby:leave': () => void;
+  /** People I follow (their ids). */
+  'follow:list': (ack: Ack<{ ids: string[] }>) => void;
+  'follow:set': (userId: string, follow: boolean, ack: Ack) => void;
+  'dm:conversations': (ack: Ack<{ conversations: Conversation[] }>) => void;
+  /** The latest messages with this person, oldest first. Marks the ones to me as read. */
+  'dm:history': (userId: string, ack: Ack<{ user: PublicUser; messages: DirectMessage[] }>) => void;
+  'dm:send': (userId: string, text: string, ack: Ack<{ message: DirectMessage }>) => void;
+  'dm:read': (userId: string, ack: Ack) => void;
   'seek:create': (req: SeekRequest, ack: Ack<{ seek: Seek }>) => void;
   'seek:cancel': (seekId: string, ack: Ack) => void;
   'seek:accept': (seekId: string, ack: Ack<{ gameId: string }>) => void;
@@ -177,6 +202,8 @@ export interface ServerToClientEvents {
   'lobbychat:message': (msg: LobbyChatMessage) => void;
   'challenge:received': (challenge: Challenge) => void;
   'challenge:updated': (update: ChallengeUpdate) => void;
+  /** A message to or from me (sent to all my tabs). */
+  'dm:message': (msg: DirectMessage, from: PublicUser) => void;
   'game:start': (gameId: string) => void;
   'game:update': (game: GameView) => void;
   'game:chat': (gameId: string, msg: ChatMessage) => void;

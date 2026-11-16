@@ -427,3 +427,44 @@ input, select {
 .lobby-chat time { color: var(--muted); font-size: 12px; margin-left: 6px; }
 .chat-input { display: flex; gap: 6px; margin-top: 8px; }
 .chat-input input { flex: 1; min-width: 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+
+/* ---- Follows and messages ---- */
+.follow-mark { color: var(--accent); }
+.row-buttons { display: flex; gap: 8px; }
+.row-buttons > * { flex: 1; display: flex; align-items: center; justify-content: center; }
+.messages-link { position: relative; }
+.count {
+  display: inline-block;
+  min-width: 18px;
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 99px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+}
+.messages { display: grid; grid-template-columns: 320px 1fr; gap: 16px; align-items: start; }
+.conversations ul { list-style: none; margin: 0; padding: 0; }
+.conversations li a { display: flex; gap: 10px; align-items: center; padding: 8px; border-radius: 8px; color: var(--text); }
+.conversations li a:hover, .conversations li a.active { background: color-mix(in srgb, var(--accent) 10%, transparent); text-decoration: none; }
+.conversations .who { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.conversations .who small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversations .side-info { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; color: var(--muted); }
+.thread { display: flex; flex-direction: column; }
+.thread-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.thread-head .grow { flex: 1; }
+.thread-head .back { display: none; font-size: 24px; line-height: 1; }
+.dm-log { height: min(60vh, 520px); overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 12px 2px; }
+.bubble { max-width: 75%; align-self: flex-start; }
+.bubble p { margin: 0; padding: 8px 12px; border-radius: 14px 14px 14px 4px; background: var(--bg); border: 1px solid var(--line); overflow-wrap: anywhere; white-space: pre-wrap; }
+.bubble small { color: var(--muted); font-size: 11px; margin: 0 6px; }
+.bubble.mine { align-self: flex-end; text-align: right; }
+.bubble.mine p { background: color-mix(in srgb, var(--accent) 16%, var(--card)); border-radius: 14px 14px 4px 14px; text-align: left; }
+@media (max-width: 760px) {
+  .messages { grid-template-columns: 1fr; }
+  .messages.open .conversations { display: none; }
+  .messages:not(.open) .empty-thread { display: none; }
+  .thread-head .back { display: inline; }
+}

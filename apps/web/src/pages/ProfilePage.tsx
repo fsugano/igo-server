@@ -1,16 +1,18 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ProfileGame, api, errorText } from '../api';
+import { api, errorText } from '../api';
 import { useAuth } from '../auth';
 import { PlayerStats } from '../components/PlayerStats';
+import { useSocial } from '../social';
 import { resultText } from './GamePage';
-import type { PublicUser } from '@igo/shared';
 
 export function ProfilePage() {
   const { username = '' } = useParams();
-  const [data, setData] = useState<{ user: PublicUser; games: ProfileGame[] } | null>(null);
+  const [data, setData] = useState<Awaited<ReturnType<typeof api.profile>> | null>(null);
   const [missing, setMissing] = useState(false);
   const { user: me } = useAuth();
+  const { following, setFollow } = useSocial();
+  const [error, setError] = useState('');
 
   useEffect(() => {
     setData(null);
@@ -19,7 +21,15 @@ export function ProfilePage() {
 
   if (missing) return <p className="empty">ユーザーが見つかりません</p>;
   if (!data) return <p className="empty">読み込み中…</p>;
-  const { user, games } = data;
+  const { user, games, follows } = data;
+  const isFollowing = following.has(user.id);
+  const toggleFollow = async () => {
+    setError('');
+    const e = await setFollow(user.id, !isFollowing);
+    if (e) return setError(errorText(e));
+    // The follower count changed: count it here rather than fetching the profile again.
+    setData({ ...data, follows: { ...follows, followers: follows.followers + (isFollowing ? -1 : 1) } });
+  };
   const mine = me?.id === user.id;
   const finished = games.filter((g) => g.status === 'finished');
   const wins = finished.filter(
@@ -35,6 +45,20 @@ export function ProfilePage() {
       <p className="meta">
         レーティング {user.rating} · レート対局 {user.gamesPlayed}局 · 直近{finished.length}局で{wins}勝
       </p>
+      {!user.bot && (
+        <p className="meta">
+          フォロー {follows.following} · フォロワー {follows.followers}
+        </p>
+      )}
+      {me && !mine && !user.bot && (
+        <div className="buttons">
+          <button onClick={() => void toggleFollow()}>{isFollowing ? 'フォロー中' : 'フォローする'}</button>
+          <Link className="button" to={`/messages/${user.id}`}>
+            メッセージを送る
+          </Link>
+        </div>
+      )}
+      {error && <p className="error">{error}</p>}
       {mine && <RecordingConsent />}
       <PlayerStats username={user.username} />
       <h3>対局履歴</h3>

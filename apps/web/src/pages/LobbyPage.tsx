@@ -7,6 +7,7 @@ import { useAuth } from '../auth';
 import { BotBadge } from '../components/BotBadge';
 import { CLOCK_PRESETS, GameForm, colorLabel, rulesLabel, sizeLabel } from '../components/GameForm';
 import { Modal } from '../components/Modal';
+import { useSocial } from '../social';
 import { call, getSocket } from '../socket';
 
 /** Byo-yomi only: a game between engines then never waits on a long main time. */
@@ -149,12 +150,26 @@ function OnlineList({
   onError: (e: string) => void;
 }) {
   const { user } = useAuth();
+  const { following } = useSocial();
   const [query, setQuery] = useState('');
   const [onlyAvailable, setOnlyAvailable] = useState(false);
+  const [onlyFollowing, setOnlyFollowing] = useState(false);
   const q = query.trim().toLowerCase();
-  const people = lobby.online.filter(
-    (u) => (!q || u.username.toLowerCase().includes(q)) && (!onlyAvailable || u.status === 'available'),
-  );
+  const myRating = me?.rating ?? 0;
+  // People I follow first, then those free to play, then the closest in strength.
+  const rank = (u: OnlineUser) => [following.has(u.id) ? 0 : 1, u.status === 'available' ? 0 : 1, Math.abs(u.rating - myRating)];
+  const people = lobby.online
+    .filter(
+      (u) =>
+        (!q || u.username.toLowerCase().includes(q)) &&
+        (!onlyAvailable || u.status === 'available') &&
+        (!onlyFollowing || following.has(u.id)),
+    )
+    .sort((a, b) => {
+      const ra = rank(a);
+      const rb = rank(b);
+      return ra[0] - rb[0] || ra[1] - rb[1] || ra[2] - rb[2];
+    });
 
   const setBusy = async (busy: boolean) => {
     const r = await call('presence:setStatus', busy ? 'busy' : 'available');
@@ -169,6 +184,12 @@ function OnlineList({
           <input type="checkbox" checked={onlyAvailable} onChange={(e) => setOnlyAvailable(e.target.checked)} />
           対局できる人だけ
         </label>
+        {user && (
+          <label className="check">
+            <input type="checkbox" checked={onlyFollowing} onChange={(e) => setOnlyFollowing(e.target.checked)} />
+            フォロー中だけ
+          </label>
+        )}
         {me && (me.status === 'available' || me.status === 'busy') && (
           <label className="check" title="オフにすると、ほかの人から対局を申し込まれなくなります">
             <input type="checkbox" checked={me.status === 'available'} onChange={(e) => void setBusy(!e.target.checked)} />
@@ -194,7 +215,10 @@ function OnlineList({
             <button className={`person${u.id === user?.id ? ' me' : ''}`} onClick={() => onOpen(u)}>
               <span className="avatar">{initial(u.username)}</span>
               <span className="who">
-                <strong>{u.username}</strong>
+                <strong>
+                  {u.username}
+                  {following.has(u.id) && <span className="follow-mark" title="フォロー中"> ★</span>}
+                </strong>
                 <small>
                   {u.rank} · {u.rating}
                   {u.id === user?.id && ' · あなた'}
@@ -205,13 +229,14 @@ function OnlineList({
           </li>
         ))}
       </ul>
-      {!people.length && <p className="empty">{q || onlyAvailable ? '条件に合う人はいません' : 'オンラインの人はいません'}</p>}
+      {!people.length && <p className="empty">{q || onlyAvailable || onlyFollowing ? '条件に合う人はいません' : 'オンラインの人はいません'}</p>}
     </>
   );
 }
 
 function UserSheet({ u, offline, onClose }: { u: OnlineUser; offline: boolean; onClose: () => void }) {
   const { user } = useAuth();
+  const { following, setFollow } = useSocial();
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState('');
   const isMe = u.id === user?.id;
@@ -250,7 +275,17 @@ function UserSheet({ u, offline, onClose }: { u: OnlineUser; offline: boolean; o
               対局を申し込む
             </button>
           )}
-          {!user && <small className="meta">対局を申し込むにはログインしてください</small>}
+          {user && !isMe && (
+            <div className="row-buttons">
+              <Link className="button" to={`/messages/${u.id}`}>
+                チャット
+              </Link>
+              <button onClick={() => void setFollow(u.id, !following.has(u.id)).then((e) => e && setError(errorText(e)))}>
+                {following.has(u.id) ? 'フォロー中' : 'フォローする'}
+              </button>
+            </div>
+          )}
+          {!user && <small className="meta">対局の申し込みやチャットにはログインが必要です</small>}
           {u.gameId && (
             <Link className="button" to={`/game/${u.gameId}`}>
               観戦する

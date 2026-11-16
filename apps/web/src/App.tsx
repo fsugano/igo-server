@@ -2,6 +2,8 @@ import { canBroadcast } from '@igo/shared';
 import { useEffect } from 'react';
 import { Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from './auth';
+import { MessagesPage } from './pages/MessagesPage';
+import { useSocial } from './social';
 import { ChallengeCenter } from './components/ChallengeCenter';
 import { AdminPage } from './pages/AdminPage';
 import { BroadcastPage } from './pages/BroadcastPage';
@@ -13,6 +15,7 @@ import { getSocket } from './socket';
 
 export function App() {
   const { user, account, logout } = useAuth();
+  const { unread } = useSocial();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -46,6 +49,9 @@ export function App() {
           {user ? (
             <>
               {canBroadcast(account?.role) && <Link to="/admin">運営</Link>}
+              <Link to="/messages" className="messages-link">
+                メッセージ{unread > 0 && <span className="count" aria-label={`未読${unread}件`}>{unread}</span>}
+              </Link>
               <Link to={`/u/${user.username}`} className="me">
                 {user.username} <span className="rank">{user.rank}</span>
               </Link>
@@ -65,6 +71,8 @@ export function App() {
           <Route path="/game/:id" element={<GamePage />} />
           <Route path="/u/:username" element={<ProfilePage />} />
           <Route path="/admin" element={<AdminPage />} />
+          <Route path="/messages" element={<MessagesPage />} />
+          <Route path="/messages/:userId" element={<MessagesPage />} />
           <Route path="*" element={<p className="empty">ページが見つかりません</p>} />
         </Routes>
       </main>

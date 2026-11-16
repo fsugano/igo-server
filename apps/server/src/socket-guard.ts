@@ -56,10 +56,10 @@ interface Rule {
 }
 
 const RULES: [RegExp, Rule][] = [
-  [/^(game:chat|lobbychat:send)$/, { group: 'chat', max: 3, windowMs: 5_000 }],
+  [/^(game:chat|lobbychat:send|dm:send)$/, { group: 'chat', max: 3, windowMs: 5_000 }],
   [/^(seek:create|seek:cancel|seek:accept|ai:start|challenge:(create|respond|cancel))$/, { group: 'match', max: 10, windowMs: 60_000 }],
   [/^game:(move|pass|resign|toggleDead|acceptScore|resume)$/, { group: 'play', max: 20, windowMs: 5_000 }],
-  [/^(lobby:join|game:join|gauge:watch|ai:engines|challenge:list|presence:setStatus)$/, { group: 'join', max: 30, windowMs: 10_000 }],
+  [/^(lobby:join|game:join|gauge:watch|ai:engines|challenge:list|presence:setStatus|follow:(list|set)|dm:(conversations|history|read))$/, { group: 'join', max: 30, windowMs: 10_000 }],
 ];
 
 function ruleFor(event: string): Rule | null {

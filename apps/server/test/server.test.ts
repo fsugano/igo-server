@@ -72,15 +72,20 @@ async function connect(cookie?: string): Promise<Client> {
 const emit = <T = any>(s: Client, ev: string, ...args: unknown[]): Promise<T> =>
   new Promise((r) => (s.emit as any)(ev, ...args, r));
 
-/** Logs in an account made by an earlier test (sign-ups are limited per address). */
+const cookies = new Map<string, string>();
+/** Logs in an account made by an earlier test (sign-ups and logins are limited per address, so each logs in once). */
 async function login(username: string) {
+  const known = cookies.get(username);
+  if (known) return known;
   const res = await fetch(`${base}/api/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username, password: 'password123' }),
   });
   expect(res.status).toBe(200);
-  return res.headers.get('set-cookie')!.split(';')[0];
+  const cookie = res.headers.get('set-cookie')!.split(';')[0];
+  cookies.set(username, cookie);
+  return cookie;
 }
 
 /** The next event of this kind that passes the test. */
@@ -457,5 +462,41 @@ describe('lobby', () => {
     expect((await emit(s, 'lobbychat:send', '   ')).error).toBe('invalid_chat');
     const again = await emit(s, 'lobby:join');
     expect(again.chat.at(-1)).toMatchObject({ text: 'よろしくお願いします', user: { username: 'alice' } });
+  });
+
+  it('follows people and sends messages between two', async () => {
+    const sa = await connect(await login('alice'));
+    const sb = await connect(await login('black1'));
+    const ids: Record<string, string> = {};
+    const j = await emit(sa, 'lobby:join');
+    for (const n of ['alice', 'black1']) ids[n] = j.lobby.online.find((u: any) => u.username === n)?.id;
+    expect(ids.black1).toBeTruthy();
+
+    expect((await emit(sa, 'follow:set', ids.alice, true)).error).toBe('invalid_target');
+    expect((await emit(sa, 'follow:set', ids.black1, true)).ok).toBe(true);
+    expect((await emit(sa, 'follow:set', ids.black1, true)).ok).toBe(true);
+    expect((await emit(sa, 'follow:list')).ids).toEqual([ids.black1]);
+    const profile = await (await fetch(`${base}/api/users/black1`, { headers: { cookie: await login('alice') } })).json();
+    expect(profile.follows.followers).toBe(1);
+    expect(profile.following).toBe(true);
+
+    // alice wrote in the lobby chat just before (3 messages per 5 seconds), so black1 writes.
+    const got = nextEvent<any>(sa, 'dm:message');
+    const sent = await emit(sb, 'dm:send', ids.alice, 'こんど9路で打ちませんか');
+    expect(sent.ok).toBe(true);
+    expect((await got).text).toBe('こんど9路で打ちませんか');
+    expect((await emit(sb, 'dm:send', '999999', 'hi')).error).toBe('no_such_user');
+    const bots = await emit(sb, 'ai:engines');
+    expect((await emit(sb, 'dm:send', bots.engines[0].user.id, 'hi')).error).toBe('invalid_target');
+
+    let conv = (await emit(sa, 'dm:conversations')).conversations;
+    expect(conv[0]).toMatchObject({ user: { username: 'black1' }, unread: 1, last: { text: 'こんど9路で打ちませんか' } });
+    const h = await emit(sa, 'dm:history', ids.black1);
+    expect(h.messages.map((m: any) => m.text)).toEqual(['こんど9路で打ちませんか']);
+    conv = (await emit(sa, 'dm:conversations')).conversations;
+    expect(conv[0].unread).toBe(0);
+
+    expect((await emit(sa, 'follow:set', ids.black1, false)).ok).toBe(true);
+    expect((await emit(sa, 'follow:list')).ids).toEqual([]);
   });
 });
