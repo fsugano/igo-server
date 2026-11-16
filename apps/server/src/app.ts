@@ -663,7 +663,15 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
   });
 
   if (config.webDist && existsSync(config.webDist)) {
-    await app.register(fastifyStatic, { root: config.webDist, wildcard: false });
+    await app.register(fastifyStatic, {
+      root: config.webDist,
+      wildcard: false,
+      // Hashed build files never change; the page and the service worker must be checked every time.
+      setHeaders: (res, path) => {
+        if (/[\\/]assets[\\/]/.test(path)) res.header('cache-control', 'public, max-age=31536000, immutable');
+        else if (/(sw\.js|index\.html)$/.test(path)) res.header('cache-control', 'no-cache');
+      },
+    });
     app.setNotFoundHandler((req, reply) => {
       if (req.url.startsWith('/api/') || req.url.startsWith('/socket.io/')) {
         return reply.code(404).send({ error: 'not_found' });

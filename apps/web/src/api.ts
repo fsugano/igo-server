@@ -3,10 +3,13 @@ import type { NewsItem, AppSettings, ClockSettings, GameSettings, Move, PlayStyl
 export class ApiError extends Error {}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  // No connection at all (offline, server down): one clear message instead of the browser's.
   const res = await fetch(path, {
     ...init,
     credentials: 'same-origin',
     headers: init?.body ? { 'content-type': 'application/json' } : undefined,
+  }).catch(() => {
+    throw new ApiError('offline');
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError(body.error ?? `http_${res.status}`);
@@ -173,6 +176,7 @@ const ERRORS: Record<string, string> = {
   image_too_large: '画像は5MBまでです',
   invalid_news: 'タイトル（100文字まで）・本文・日時を確認してください。掲載終了は公開より後にしてください',
   not_found: '見つかりません',
+  offline: '接続されていません。インターネットへの接続を確かめてください',
 };
 
 export const errorText = (code: string) => ERRORS[code] ?? code;

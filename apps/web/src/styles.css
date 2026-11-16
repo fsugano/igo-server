@@ -521,3 +521,39 @@ img.avatar { object-fit: cover; }
 .row-head h2 { margin: 0; }
 .row-head .grow { flex: 1; }
 .form textarea { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; resize: vertical; }
+
+/* ---- Confirm before playing ---- */
+.board .stone.pending { opacity: 0.75; }
+.board .pending-ring { fill: none; stroke: var(--accent); stroke-width: 0.08; stroke-dasharray: 0.2 0.12; }
+.confirm-move button.primary { flex: 1; }
+.confirm-toggle { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); margin: 6px 0; }
+
+.update-toast { position: fixed; left: 16px; bottom: 16px; z-index: 45; }
+
+/* ---- Phones (from 360px wide) and the notch / home indicator ---- */
+.topbar { padding-left: max(20px, env(safe-area-inset-left)); padding-right: max(20px, env(safe-area-inset-right)); padding-top: max(10px, env(safe-area-inset-top)); }
+.toasts { bottom: max(16px, env(safe-area-inset-bottom)); }
+@media (max-width: 640px) {
+  .topbar { flex-wrap: wrap; gap: 6px; padding: max(8px, env(safe-area-inset-top)) 12px 8px; }
+  .topbar nav { width: 100%; gap: 14px; overflow-x: auto; white-space: nowrap; font-size: 14px; scrollbar-width: none; }
+  .topbar nav .me .rank { display: none; }
+  main { padding: 10px max(8px, env(safe-area-inset-left)) max(16px, env(safe-area-inset-bottom)); }
+  .card { padding: 12px; border-radius: 8px; }
+  .lobby-tabs button { font-size: 13px; padding: 6px 4px; }
+  .toolbar { font-size: 13px; gap: 6px 12px; }
+  .people { grid-template-columns: 1fr; }
+  .list { display: block; overflow-x: auto; }
+  .toasts { left: 12px; right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); }
+  .toast { justify-content: space-between; }
+  .update-toast { left: 12px; right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); }
+  /* Dialogs come up from the bottom, within reach of a thumb. */
+  .overlay { place-items: end stretch; padding: 0; }
+  .dialog { width: 100%; max-height: 88vh; border-radius: 14px 14px 0 0; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+  .form .row { flex-wrap: wrap; }
+  .form .row > label { min-width: 40%; }
+  .profile-head { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .row-head { flex-wrap: wrap; }
+  .thread-head { gap: 6px; }
+  .dm-log { height: calc(100vh - 260px); }
+  button:not(.link), .button { min-height: 40px; }
+}

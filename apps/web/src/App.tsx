@@ -14,6 +14,7 @@ import { LobbyPage } from './pages/LobbyPage';
 import { LoginPage } from './pages/LoginPage';
 import { ProfilePage } from './pages/ProfilePage';
 import { getSocket } from './socket';
+import { UpdateNotice } from './pwa';
 import { api } from './api';
 import { NewsPage } from './pages/NewsPage';
 import { AdminNewsPage } from './pages/AdminNewsPage';
@@ -118,6 +119,7 @@ export function App() {
         </Routes>
       </main>
       <ChallengeCenter />
+      <UpdateNotice />
     </div>
   );
 }
