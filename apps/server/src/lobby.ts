@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { LobbyState, PublicUser, Seek, SeekRequest } from '@igo/shared';
+import { LobbyState, OnlineUser, PublicUser, Seek, SeekRequest } from '@igo/shared';
 import { z } from 'zod';
 
 const MIN = 60_000;
@@ -49,6 +49,8 @@ const MAX_SEEKS_PER_USER = 3;
 export class Lobby {
   readonly seeks = new Map<string, Seek>();
   private online = new Map<string, { user: PublicUser; sockets: number }>();
+  /** People who said they do not want challenges right now. */
+  private busy = new Set<string>();
 
   connect(user: PublicUser) {
     const e = this.online.get(user.id);
@@ -64,8 +66,26 @@ export class Lobby {
     if (!e) return false;
     if (--e.sockets > 0) return false;
     this.online.delete(userId);
+    this.busy.delete(userId);
     for (const [id, s] of this.seeks) if (s.creator.id === userId) this.seeks.delete(id);
     return true;
+  }
+
+  isOnline(userId: string): boolean {
+    return this.online.has(userId);
+  }
+
+  onlineUser(userId: string): PublicUser | undefined {
+    return this.online.get(userId)?.user;
+  }
+
+  setBusy(userId: string, busy: boolean) {
+    if (busy) this.busy.add(userId);
+    else this.busy.delete(userId);
+  }
+
+  isBusy(userId: string): boolean {
+    return this.busy.has(userId);
   }
 
   updateUser(user: PublicUser) {
@@ -101,11 +121,17 @@ export class Lobby {
     return s;
   }
 
-  state(games: LobbyState['games']): LobbyState {
+  /** `playing` gives the game a user is in, if any, and whether the opponent is the computer. */
+  state(games: LobbyState['games'], playing: (userId: string) => { gameId: string; vsBot: boolean } | undefined): LobbyState {
+    const online: OnlineUser[] = [...this.online.values()].map(({ user }) => {
+      const g = playing(user.id);
+      if (g) return { ...user, status: g.vsBot ? 'playing_ai' : 'playing', gameId: g.gameId };
+      return { ...user, status: this.busy.has(user.id) ? 'busy' : 'available' };
+    });
     return {
       seeks: [...this.seeks.values()].sort((a, b) => a.createdAt - b.createdAt),
       games,
-      online: [...this.online.values()].map((e) => e.user).sort((a, b) => b.rating - a.rating),
+      online: online.sort((a, b) => b.rating - a.rating),
     };
   }
 }

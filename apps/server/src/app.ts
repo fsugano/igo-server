@@ -1,25 +1,34 @@
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
+import helmet from '@fastify/helmet';
+import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import {
   Ack,
   BLACK,
+  DECLARED_RANK_GAMES,
   ClientToServerEvents,
   Game,
   GameSettings,
   GaugeState,
+  NewsItem,
   PublicUser,
   RECORDING_METHODS,
   Role,
+  SeekRequest,
   ServerToClientEvents,
   StatsGame,
   WHITE,
+  checkDisplayName,
+  gamesForLevel,
   judgeStyle,
+  levelFor,
   playerRecord,
   ratingForRank,
 } from '@igo/shared';
 import Fastify, { FastifyReply, FastifyRequest } from 'fastify';
-import { existsSync } from 'node:fs';
+import { createReadStream, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { Server, Socket } from 'socket.io';
 import { z } from 'zod';
 import { BuiltinEvaluator, Evaluator, GaugeService } from './ai/gauge.js';
@@ -28,10 +37,16 @@ import { Engine, loadEngines } from './ai/index.js';
 import type { Config } from './config.js';
 import type { Db } from './db.js';
 import { BotOptions, GameService, LiveGame, buildSgf, copyGame } from './games.js';
+import { AVATAR_FILE, AVATAR_MAX_BYTES, removeAvatar, saveAvatar } from './avatars.js';
+import { Challenges } from './challenges.js';
 import { Lobby, aiGameSchema, validHandicap } from './lobby.js';
+import { LobbyChat } from './lobby-chat.js';
+import { Moderation, RESOLUTIONS, Resolution, reportSchema } from './moderation.js';
+import { News, newsSchema } from './news.js';
 import { Settings } from './settings.js';
+import { Social } from './social.js';
 import { EventLimiter, originAllowed } from './socket-guard.js';
-import { UserRow, Users, dummyHash, toPublicUser, verifyPassword } from './users.js';
+import { UserRow, Users, dummyHash, toPublicUser, userJson, verifyPassword } from './users.js';
 
 const SESSION_COOKIE = 'sid';
 /** Finished games the record and style are computed from (the latest ones). */
@@ -44,12 +59,24 @@ const registerSchema = z.object({
 });
 const loginSchema = z.object({ username: z.string().max(32), password: z.string().max(200) });
 const accountSettingsSchema = z.object({ allowRecording: z.boolean() }).strict();
+const profileSchema = z
+  .object({
+    displayName: z.string().max(100).optional(),
+    declaredRank: registerSchema.shape.rank.optional(),
+  })
+  .strict();
 
 type IoSocket = Socket<ClientToServerEvents, ServerToClientEvents, {}, { user: PublicUser | null }>;
 
 /** Games between two engines use CPU while nobody plays: keep them few. */
 const MAX_AI_ONLY_GAMES = 4;
 const MAX_AI_ONLY_GAMES_PER_USER = 1;
+/** People playing the computer at once (each game keeps a CPU core busy while the computer thinks). */
+const MAX_PERSON_AI_GAMES = Number(process.env.AI_MAX_GAMES ?? 20);
+/** How often expired sessions are removed. */
+const SESSION_SWEEP_MS = 60 * 60 * 1000;
+/** How often scheduled news is checked. */
+const NEWS_CHECK_MS = 30_000;
 
 export interface AppOptions extends Omit<BotOptions, 'engines'> {
   /** Computer players. Default: the built-in levels plus AI_GTP_ENGINES. */
@@ -58,6 +85,8 @@ export interface AppOptions extends Omit<BotOptions, 'engines'> {
   evaluator?: Evaluator;
   /** What computer players say in the chat. Default: Claude when ANTHROPIC_API_KEY is set, set phrases otherwise. */
   chat?: ChatResponder;
+  /** Logins and sign-ups per minute from one address (tests raise it). */
+  authPerMinute?: number;
 }
 
 export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
@@ -67,10 +96,34 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     trustProxy: config.trustProxy as boolean | string,
   });
   await app.register(cookie);
+  await app.register(helmet, {
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        // React sets style attributes (board size, gauge width).
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:', 'blob:'],
+        mediaSrc: ["'self'", 'blob:'],
+        connectSrc: ["'self'", 'ws:', 'wss:'],
+        frameAncestors: ["'none'"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+      },
+    },
+    // Recorded videos are made from this same tab; nothing is embedded from other sites.
+    crossOriginEmbedderPolicy: false,
+  });
   await app.register(rateLimit, { global: false });
+  await app.register(multipart, { limits: { fileSize: AVATAR_MAX_BYTES, files: 1, fields: 0, parts: 1 } });
 
   const users = new Users(db);
   const lobby = new Lobby();
+  const lobbyChat = new LobbyChat(db);
+  const social = new Social(db);
+  const news = new News(db);
+  const moderation = new Moderation(db);
   const settings = new Settings(db);
   await settings.load();
 
@@ -140,7 +193,19 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       io.to('lobby').emit('lobby:state', lobbyState());
     }, 100);
   };
-  const lobbyState = () => lobby.state([...games.live.values()].map((g) => games.summary(g)));
+  const lobbyState = () =>
+    lobby.state(
+      [...games.live.values()].map((g) => games.summary(g)),
+      (userId) => {
+        const g = userInGame(userId);
+        return g && { gameId: g.id, vsBot: g.black.bot || g.white.bot };
+      },
+    );
+
+  const challenges = new Challenges({
+    received: (c) => io.to(userRoom(c.to.id)).to(userRoom(c.from.id)).emit('challenge:received', c),
+    updated: (c, u) => io.to(userRoom(c.to.id)).to(userRoom(c.from.id)).emit('challenge:updated', u),
+  });
 
   const games: GameService = new GameService(db, {
     update: (g) => {
@@ -157,9 +222,10 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       const bot = g.black.bot ? g.black : g.white;
       if (bot.bot && !games.isAiOnly(g)) botSay(g.id, bot, LINES.thanks);
       chatCounts.delete(g.id);
+      // New rating and level.
       for (const id of [g.black.id, g.white.id]) {
         const u = await users.byId(id);
-        if (u) lobby.updateUser(toPublicUser(u));
+        if (u && !u.bot) userChanged(u);
       }
       broadcastLobby();
     },
@@ -198,7 +264,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     reply.setCookie(SESSION_COOKIE, token, cookieOpts);
   }
 
-  const authLimit = { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } };
+  const authLimit = { config: { rateLimit: { max: opts.authPerMinute ?? 10, timeWindow: '1 minute' } } };
 
   app.get('/api/health', async () => ({ ok: true }));
 
@@ -210,7 +276,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       const error = field === 'username' || field === 'password' || field === 'rank' ? `invalid_${field}` : 'invalid_input';
       return reply.code(400).send({ error });
     }
-    const u = await users.create(p.data.username, p.data.password, ratingForRank(p.data.rank));
+    const u = await users.create(p.data.username, p.data.password, ratingForRank(p.data.rank), p.data.rank.toLowerCase());
     if (u === 'taken') return reply.code(409).send({ error: 'username_taken' });
     await startSession(reply, u);
     return { user: toPublicUser(u) };
@@ -219,12 +285,14 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
   app.post('/api/auth/login', authLimit, async (req, reply) => {
     const p = loginSchema.safeParse(req.body);
     if (!p.success) return reply.code(400).send({ error: 'invalid_input' });
-    const u = await users.byName(p.data.username);
+    const cred = await users.credentials(p.data.username);
     // Check a password even for unknown names, so the response time does not tell which names exist.
-    const ok = await verifyPassword(p.data.password, u?.password_hash ?? (await dummyHash()));
+    const ok = await verifyPassword(p.data.password, cred?.passwordHash ?? (await dummyHash()));
+    const u = cred?.user;
     if (!u || !ok) {
       return reply.code(401).send({ error: 'bad_credentials' });
     }
+    if (cred.banned) return reply.code(403).send({ error: 'account_suspended' });
     await startSession(reply, u);
     return { user: toPublicUser(u) };
   });
@@ -249,6 +317,277 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     await users.setAllowRecording(u.id, p.data.allowRecording);
     return { account: { role: u.role, allowRecording: p.data.allowRecording } };
   });
+
+  // ---- Profile ----
+
+  /** What the profile editor shows. */
+  const profileOf = (u: UserRow) => {
+    const level = levelFor(u.games_completed);
+    const changed = u.display_name_changed_at ? new Date(u.display_name_changed_at).getTime() : 0;
+    return {
+      displayName: u.display_name,
+      declaredRank: u.declared_rank,
+      /** When the nickname may be changed again (ms), null if now. */
+      nameChangeAt: changed && changed + 86_400_000 > Date.now() ? changed + 86_400_000 : null,
+      /** Whether changing the declared rank still resets the rating. */
+      rankResetsRating: u.games_played < DECLARED_RANK_GAMES,
+      gamesCompleted: u.games_completed,
+      level,
+      nextLevelAt: gamesForLevel(level + 1),
+    };
+  };
+  /** Shows a change in the lobby and in the person's other tabs. */
+  const userChanged = (u: UserRow) => {
+    const pu = toPublicUser(u);
+    lobby.updateUser(pu);
+    io.to(userRoom(pu.id)).emit('user:updated', pu);
+    broadcastLobby();
+    return pu;
+  };
+
+  app.get('/api/me/profile', async (req, reply) => {
+    const u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    return { user: toPublicUser(u), profile: profileOf(u) };
+  });
+
+  app.patch('/api/me/profile', async (req, reply) => {
+    let u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    const p = profileSchema.safeParse(req.body);
+    if (!p.success) return reply.code(400).send({ error: 'invalid_input' });
+    if (p.data.displayName !== undefined) {
+      const c = checkDisplayName(p.data.displayName);
+      if ('error' in c) return reply.code(400).send({ error: c.error });
+      if (c.name !== u.display_name) {
+        const r = await users.setDisplayName(u.id, c.name);
+        if (typeof r === 'string') return reply.code(429).send({ error: r });
+        u = r;
+      }
+    }
+    if (p.data.declaredRank !== undefined) {
+      const rank = p.data.declaredRank.toLowerCase();
+      u = (await users.setDeclaredRank(u.id, rank, ratingForRank(rank), DECLARED_RANK_GAMES)) ?? u;
+    }
+    return { user: userChanged(u), profile: profileOf(u) };
+  });
+
+  // At most 10 uploads a day per account (each one is decoded and re-encoded).
+  const avatarLimit = {
+    config: {
+      rateLimit: { max: 10, timeWindow: '1 day', keyGenerator: (req: FastifyRequest) => req.cookies[SESSION_COOKIE] ?? req.ip },
+    },
+  };
+
+  app.post('/api/me/avatar', avatarLimit, async (req, reply) => {
+    const u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    let data: Buffer;
+    try {
+      const file = await req.file();
+      if (!file) return reply.code(400).send({ error: 'invalid_image' });
+      data = await file.toBuffer();
+    } catch (e) {
+      if ((e as { code?: string }).code === 'FST_REQ_FILE_TOO_LARGE') return reply.code(413).send({ error: 'image_too_large' });
+      return reply.code(400).send({ error: 'invalid_image' });
+    }
+    const id = await saveAvatar(config.uploadDir, data);
+    if (typeof id !== 'string') return reply.code(400).send({ error: id.error });
+    const old = await users.setAvatar(u.id, id);
+    await removeAvatar(config.uploadDir, old);
+    const row = (await users.byId(u.id))!;
+    return { user: userChanged(row) };
+  });
+
+  app.delete('/api/me/avatar', async (req, reply) => {
+    const u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    const old = await users.setAvatar(u.id, null);
+    await removeAvatar(config.uploadDir, old);
+    const row = (await users.byId(u.id))!;
+    return { user: userChanged(row) };
+  });
+
+  /** Profile pictures. Names are random ids, new for each upload, so they are cached for good. */
+  app.get<{ Params: { file: string } }>('/avatars/:file', async (req, reply) => {
+    const f = req.params.file;
+    if (!AVATAR_FILE.test(f)) return reply.code(404).send({ error: 'not_found' });
+    const path = join(config.uploadDir, f);
+    if (!existsSync(path)) return reply.code(404).send({ error: 'not_found' });
+    return reply
+      .header('content-type', 'image/webp')
+      .header('cache-control', 'public, max-age=31536000, immutable')
+      .send(createReadStream(path));
+  });
+
+  // ---- Leaving, reports ----
+
+  const deleteSchema = z.object({ password: z.string().max(200) }).strict();
+
+  /** Leaving (M-AUTH-04/05): asks for the password again; the games stay under "退会したユーザー". */
+  app.delete('/api/me', authLimit, async (req, reply) => {
+    const u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    const p = deleteSchema.safeParse(req.body);
+    if (!p.success) return reply.code(400).send({ error: 'invalid_input' });
+    const hash = await users.passwordHash(u.id);
+    if (!hash || !(await verifyPassword(p.data.password, hash))) return reply.code(401).send({ error: 'bad_password' });
+    if (userInGame(u.id)) return reply.code(409).send({ error: 'in_game' });
+    const avatar = await users.deleteAccount(u.id);
+    await removeAvatar(config.uploadDir, avatar);
+    signOutEverywhere(u.id);
+    app.log.info({ user: u.id }, 'account deleted');
+    reply.clearCookie(SESSION_COOKIE, { path: '/' });
+    return { ok: true };
+  });
+
+  /** Ends the realtime connections of someone who left or was suspended. */
+  function signOutEverywhere(userId: string) {
+    challenges.dropUser(userId);
+    for (const [id, s] of lobby.seeks) if (s.creator.id === userId) lobby.seeks.delete(id);
+    io.in(userRoom(userId)).disconnectSockets(true);
+    broadcastLobby();
+  }
+
+  const reportLimit = {
+    config: {
+      rateLimit: { max: 20, timeWindow: '1 day', keyGenerator: (req: FastifyRequest) => req.cookies[SESSION_COOKIE] ?? req.ip },
+    },
+  };
+
+  app.post('/api/reports', reportLimit, async (req, reply) => {
+    const u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    const p = reportSchema.safeParse(req.body);
+    if (!p.success) return reply.code(400).send({ error: 'invalid_input' });
+    const err = await moderation.report(u.id, p.data);
+    if (err) return reply.code(err === 'no_such_target' ? 404 : 400).send({ error: err });
+    return { ok: true };
+  });
+
+  app.get<{ Querystring: { status?: string } }>('/api/admin/reports', async (req, reply) => {
+    if (!(await requireRole(req, reply, ['admin']))) return;
+    return { reports: await moderation.list(req.query.status === 'closed' ? 'closed' : 'open') };
+  });
+
+  app.post<{ Params: { id: string } }>('/api/admin/reports/:id/resolve', async (req, reply) => {
+    const admin = await requireRole(req, reply, ['admin']);
+    if (!admin) return;
+    const action = (req.body as { action?: string } | null)?.action as Resolution;
+    if (!RESOLUTIONS.includes(action)) return reply.code(400).send({ error: 'invalid_input' });
+    const r = await moderation.get(req.params.id);
+    if (!r) return reply.code(404).send({ error: 'not_found' });
+    const target = r.target_user_id ? String(r.target_user_id) : null;
+    if (action === 'remove_avatar' && target) {
+      const old = await users.setAvatar(target, null);
+      await removeAvatar(config.uploadDir, old);
+      const row = await users.byId(target);
+      if (row) userChanged(row);
+    }
+    if (action === 'delete_message') await moderation.deleteMessage(r.target_type, r.target_id);
+    if (action === 'ban' && target) {
+      if (!(await users.setBanned(target, true))) return reply.code(400).send({ error: 'cannot_ban' });
+      signOutEverywhere(target);
+    }
+    await moderation.close(r.id, admin.id, action);
+    await news.audit(admin.id, `report.${action}`, r.id, { targetType: r.target_type, targetId: r.target_id, user: target });
+    return { ok: true };
+  });
+
+  // ---- News ----
+
+  const publicCache = (reply: FastifyReply) => reply.header('cache-control', 'public, max-age=60');
+
+  app.get<{ Querystring: { category?: string; before?: string } }>('/api/news', async (req, reply) => {
+    const c = req.query.category;
+    if (c && !['info', 'maintenance', 'update', 'event'].includes(c)) return reply.code(400).send({ error: 'invalid_input' });
+    publicCache(reply);
+    return news.list(c, req.query.before);
+  });
+
+  app.get('/api/news/important', async (_req, reply) => {
+    // Not cached: the banner must show an urgent item at once.
+    reply.header('cache-control', 'no-cache');
+    return { items: await news.important() };
+  });
+
+  app.get('/api/news/unread-count', async (req, reply) => {
+    const u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    return { count: await news.unreadCount(u.id) };
+  });
+
+  app.post('/api/news/read', async (req, reply) => {
+    const u = await currentUser(req);
+    if (!u) return reply.code(401).send({ error: 'login_required' });
+    await news.markRead(u.id);
+    return { ok: true };
+  });
+
+  app.get<{ Params: { id: string } }>('/api/news/:id', async (req, reply) => {
+    const item = await news.get(req.params.id);
+    if (!item) return reply.code(404).send({ error: 'not_found' });
+    publicCache(reply);
+    return { item };
+  });
+
+  // Operators' news. Each change is written to the audit log.
+  const adminLimit = { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } };
+  /** Tells the people online about items that have become visible. */
+  const announce = (items: NewsItem[]) => {
+    // Without the body: it is fetched when opened. (An item may be announced twice; the page keeps one per id.)
+    for (const { body: _body, ...item } of items) io.emit('news:published', item);
+  };
+  const visibleNow = (n: { publishAt: number | null; expireAt: number | null }) =>
+    n.publishAt !== null && n.publishAt <= Date.now() && (n.expireAt === null || n.expireAt > Date.now());
+
+  app.get('/api/admin/news', adminLimit, async (req, reply) => {
+    if (!(await requireRole(req, reply, ['admin']))) return;
+    return { items: await news.all() };
+  });
+
+  app.post('/api/admin/news', adminLimit, async (req, reply) => {
+    const u = await requireRole(req, reply, ['admin']);
+    if (!u) return;
+    const p = newsSchema.safeParse(req.body);
+    if (!p.success) return reply.code(400).send({ error: 'invalid_news' });
+    const item = await news.create(p.data, u.id);
+    await news.audit(u.id, 'news.create', item.id, { title: item.title, publishAt: item.publishAt });
+    if (visibleNow(item)) announce([item]);
+    return { item };
+  });
+
+  app.patch<{ Params: { id: string } }>('/api/admin/news/:id', adminLimit, async (req, reply) => {
+    const u = await requireRole(req, reply, ['admin']);
+    if (!u) return;
+    const p = newsSchema.safeParse(req.body);
+    if (!p.success) return reply.code(400).send({ error: 'invalid_news' });
+    const before = await news.get(req.params.id, true);
+    const item = await news.update(req.params.id, p.data);
+    if (!item) return reply.code(404).send({ error: 'not_found' });
+    await news.audit(u.id, 'news.update', item.id, { title: item.title, publishAt: item.publishAt });
+    if (visibleNow(item) && !(before && visibleNow(before))) announce([item]);
+    return { item };
+  });
+
+  app.delete<{ Params: { id: string } }>('/api/admin/news/:id', adminLimit, async (req, reply) => {
+    const u = await requireRole(req, reply, ['admin']);
+    if (!u) return;
+    const item = await news.get(req.params.id, true);
+    if (!item || !(await news.remove(item.id))) return reply.code(404).send({ error: 'not_found' });
+    await news.audit(u.id, 'news.delete', item.id, { title: item.title });
+    return { ok: true };
+  });
+
+  // Items scheduled for later are announced when their time comes.
+  let newsCheckedAt = new Date();
+  const checkScheduled = async () => {
+    const since = newsCheckedAt;
+    newsCheckedAt = new Date();
+    announce(await news.publishedBetween(since));
+  };
+  const newsTimer = setInterval(() => void checkScheduled().catch((e) => app.log.error(e)), NEWS_CHECK_MS);
+  newsTimer.unref();
 
   // ---- Operators ----
 
@@ -322,8 +661,13 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
        WHERE g.black_id = $1 OR g.white_id = $1 ORDER BY g.started_at DESC LIMIT 50`,
       [u.id],
     );
+    const viewer = await currentUser(req);
     return {
       user: toPublicUser(u),
+      declaredRank: u.declared_rank,
+      gamesCompleted: u.games_completed,
+      follows: await social.counts(u.id),
+      following: viewer && viewer.id !== u.id ? await social.isFollowing(viewer.id, u.id) : null,
       games: r.rows.map((g) => ({
         id: String(g.id),
         black: g.black,
@@ -343,7 +687,7 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
   app.get<{ Params: { id: string } }>('/api/games/:id', async (req, reply) => {
     if (!/^\d+$/.test(req.params.id)) return reply.code(404).send({ error: 'not_found' });
     const r = await db.query(
-      `SELECT g.*, row_to_json(b) AS b, row_to_json(w) AS w FROM games g
+      `SELECT g.*, ${userJson('b')} AS b, ${userJson('w')} AS w FROM games g
        JOIN users b ON b.id = g.black_id JOIN users w ON w.id = g.white_id WHERE g.id = $1`,
       [req.params.id],
     );
@@ -398,7 +742,15 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
   });
 
   if (config.webDist && existsSync(config.webDist)) {
-    await app.register(fastifyStatic, { root: config.webDist, wildcard: false });
+    await app.register(fastifyStatic, {
+      root: config.webDist,
+      wildcard: false,
+      // Hashed build files never change; the page and the service worker must be checked every time.
+      setHeaders: (res, path) => {
+        if (/[\\/]assets[\\/]/.test(path)) res.header('cache-control', 'public, max-age=31536000, immutable');
+        else if (/(sw\.js|index\.html)$/.test(path)) res.header('cache-control', 'no-cache');
+      },
+    });
     app.setNotFoundHandler((req, reply) => {
       if (req.url.startsWith('/api/') || req.url.startsWith('/socket.io/')) {
         return reply.code(404).send({ error: 'not_found' });
@@ -451,9 +803,10 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
           });
       };
 
-    socket.on('lobby:join', safe((ack) => {
+    socket.on('lobby:join', safe(async (ack) => {
       socket.join('lobby');
-      ack({ ok: true, lobby: lobbyState() });
+      // The chat is for members: visitors who are not logged in do not get it.
+      ack({ ok: true, lobby: lobbyState(), chat: me ? await lobbyChat.recent() : [] });
     }));
     socket.on('lobby:leave', () => void socket.leave('lobby'));
 
@@ -478,26 +831,170 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     socket.on('seek:accept', safe(async (seekId, ack) => {
       const u = needUser(ack);
       if (!u) return;
-      if (userInGame(u.id)) return ack({ ok: false, error: 'already_playing' });
+      if (userInGame(u.id) || starting.has(u.id)) return ack({ ok: false, error: 'already_playing' });
+      const wanted = lobby.seeks.get(String(seekId));
+      if (wanted && starting.has(wanted.creator.id)) return ack({ ok: false, error: 'already_playing' });
       const s = lobby.takeSeek(u.id, String(seekId));
       if (typeof s === 'string') return ack({ ok: false, error: s });
-      const [creator, accepter] = await Promise.all([users.byId(s.creator.id), users.byId(u.id)]);
-      if (!creator || !accepter) return ack({ ok: false, error: 'no_such_user' });
-      const creatorBlack = s.color === 'black' || (s.color === 'random' && Math.random() < 0.5);
-      const settings: GameSettings = { size: s.size, komi: s.komi, handicap: s.handicap, ruleset: s.ruleset };
-      const g = await games.create({
-        black: creatorBlack ? creator : accepter,
-        white: creatorBlack ? accepter : creator,
-        settings,
-        clock: s.clock,
-        rated: s.rated,
-      });
-      // A player in a game should not have other open seeks.
-      for (const [id, other] of lobby.seeks) {
-        if (other.creator.id === creator.id || other.creator.id === accepter.id) lobby.seeks.delete(id);
-      }
-      io.to(userRoom(g.black.id)).to(userRoom(g.white.id)).emit('game:start', g.id);
+      const g = await startGame(s.creator.id, u.id, s);
+      if (typeof g === 'string') return ack({ ok: false, error: g });
       ack({ ok: true, gameId: g.id });
+    }));
+
+    // ---- Challenges: a game offered to one particular person ----
+
+    socket.on('challenge:list', safe((ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      ack({ ok: true, challenges: challenges.list(u.id) });
+    }));
+
+    socket.on('challenge:create', safe(async (userId, req, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      if (userInGame(u.id) || starting.has(u.id)) return ack({ ok: false, error: 'already_playing' });
+      const target = lobby.onlineUser(String(userId));
+      if (!target) return ack({ ok: false, error: 'user_offline' });
+      if (userInGame(target.id) || starting.has(target.id)) return ack({ ok: false, error: 'opponent_playing' });
+      if (lobby.isBusy(target.id)) return ack({ ok: false, error: 'opponent_busy' });
+      if (await moderation.blockedEither(u.id, target.id)) return ack({ ok: false, error: 'user_unavailable' });
+      // The block check waited for the database: look at presence and games again.
+      if (!lobby.isOnline(target.id)) return ack({ ok: false, error: 'user_offline' });
+      if (userInGame(target.id) || starting.has(target.id)) return ack({ ok: false, error: 'opponent_playing' });
+      if (userInGame(u.id) || starting.has(u.id)) return ack({ ok: false, error: 'already_playing' });
+      const c = challenges.create(u, target, req);
+      if (typeof c === 'string') return ack({ ok: false, error: c });
+      ack({ ok: true, challenge: c });
+    }));
+
+    socket.on('challenge:cancel', safe((id, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      const r = challenges.cancel(u.id, String(id));
+      ack(r === true ? { ok: true } : { ok: false, error: r });
+    }));
+
+    socket.on('challenge:respond', safe(async (id, answer, detail, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      const d = (detail ?? {}) as { reason?: unknown; request?: unknown };
+      if (answer === 'decline') {
+        const r = challenges.decline(u.id, String(id), typeof d.reason === 'string' ? d.reason : undefined);
+        return ack(r === true ? { ok: true } : { ok: false, error: r });
+      }
+      if (answer === 'counter') {
+        const c = challenges.counter(u.id, String(id), d.request);
+        return ack(typeof c === 'string' ? { ok: false, error: c } : { ok: true, challenge: c });
+      }
+      if (answer !== 'accept') return ack({ ok: false, error: 'invalid_input' });
+      if (userInGame(u.id) || starting.has(u.id)) return ack({ ok: false, error: 'already_playing' });
+      const c = challenges.take(u.id, String(id));
+      if (typeof c === 'string') return ack({ ok: false, error: c });
+      if (!lobby.isOnline(c.from.id)) {
+        challenges.finish(c, { id: c.id, outcome: 'cancelled' });
+        return ack({ ok: false, error: 'user_offline' });
+      }
+      const g = await startGame(c.from.id, u.id, c.request).catch((e) => {
+        challenges.restore(c);
+        throw e;
+      });
+      if (typeof g === 'string') {
+        challenges.restore(c);
+        return ack({ ok: false, error: g === 'already_playing' ? 'opponent_playing' : g });
+      }
+      challenges.finish(c, { id: c.id, outcome: 'accepted', gameId: g.id });
+      ack({ ok: true, gameId: g.id });
+    }));
+
+    // ---- Lobby chat ----
+
+    socket.on('lobbychat:send', safe(async (text, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      if (!socket.rooms.has('lobby')) return ack({ ok: false, error: 'not_in_lobby' });
+      const msg = await lobbyChat.post(u, text);
+      if (!msg) return ack({ ok: false, error: 'invalid_chat' });
+      io.to('lobby').emit('lobbychat:message', msg);
+      ack({ ok: true });
+    }));
+
+    // ---- Follows and messages between two people ----
+
+    socket.on('follow:list', safe(async (ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      ack({ ok: true, ids: await social.following(u.id) });
+    }));
+
+    socket.on('follow:set', safe(async (userId, follow, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      if (follow && (await moderation.blockedEither(u.id, String(userId)))) return ack({ ok: false, error: 'user_unavailable' });
+      const err = await social.setFollow(u.id, String(userId), !!follow);
+      ack(err ? { ok: false, error: err } : { ok: true });
+    }));
+
+    socket.on('block:list', safe(async (ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      ack({ ok: true, ids: await moderation.blocked(u.id) });
+    }));
+
+    socket.on('block:set', safe(async (userId, block, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      const err = await moderation.setBlock(u.id, String(userId), !!block);
+      if (err) return ack({ ok: false, error: err });
+      // Open challenges between them end.
+      if (block) for (const c of challenges.list(u.id)) if (c.from.id === String(userId) || c.to.id === String(userId)) {
+        if (c.from.id === u.id) challenges.cancel(u.id, c.id);
+        else challenges.decline(u.id, c.id);
+      }
+      ack({ ok: true });
+    }));
+
+    socket.on('dm:conversations', safe(async (ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      ack({ ok: true, conversations: await social.conversations(u.id) });
+    }));
+
+    socket.on('dm:history', safe(async (userId, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      const other = await social.recipient(u.id, String(userId));
+      if (typeof other === 'string') return ack({ ok: false, error: other });
+      await social.markRead(u.id, other.id);
+      ack({ ok: true, user: other, messages: await social.history(u.id, other.id) });
+    }));
+
+    socket.on('dm:read', safe(async (userId, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      const id = String(userId);
+      if (!/^\d{1,18}$/.test(id)) return ack({ ok: false, error: 'no_such_user' });
+      await social.markRead(u.id, id);
+      ack({ ok: true });
+    }));
+
+    socket.on('dm:send', safe(async (userId, text, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      const other = await social.recipient(u.id, String(userId));
+      if (typeof other === 'string') return ack({ ok: false, error: other });
+      if (await moderation.blockedEither(u.id, other.id)) return ack({ ok: false, error: 'user_unavailable' });
+      const msg = await social.send(u.id, other.id, text);
+      if (!msg) return ack({ ok: false, error: 'invalid_chat' });
+      io.to(userRoom(u.id)).to(userRoom(other.id)).emit('dm:message', msg, u);
+      ack({ ok: true, message: msg });
+    }));
+
+    socket.on('presence:setStatus', safe((status, ack) => {
+      const u = needUser(ack);
+      if (!u) return;
+      if (status !== 'available' && status !== 'busy') return ack({ ok: false, error: 'invalid_input' });
+      lobby.setBusy(u.id, status === 'busy');
+      ack({ ok: true });
       broadcastLobby();
     }));
 
@@ -512,7 +1009,11 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
       const people = [r.black, r.white].filter((x) => x === null).length;
       if (people === 2) return ack({ ok: false, error: 'invalid_seek' });
       for (const id of [r.black, r.white]) if (id !== null && !botUsers.has(id)) return ack({ ok: false, error: 'no_such_engine' });
-      if (people === 1 && userInGame(u.id)) return ack({ ok: false, error: 'already_playing' });
+      if (people === 1 && (userInGame(u.id) || starting.has(u.id))) return ack({ ok: false, error: 'already_playing' });
+      if (people === 1) {
+        const withPerson = [...games.live.values()].filter((g) => !games.isAiOnly(g) && (g.black.bot || g.white.bot));
+        if (withPerson.length >= MAX_PERSON_AI_GAMES) return ack({ ok: false, error: 'server_busy' });
+      }
       if (people === 0) {
         const aiOnly = [...games.live.values()].filter((g) => games.isAiOnly(g));
         if (aiOnly.filter((g) => g.owner === u.id).length >= MAX_AI_ONLY_GAMES_PER_USER) {
@@ -520,19 +1021,25 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
         }
         if (aiOnly.length >= MAX_AI_ONLY_GAMES) return ack({ ok: false, error: 'server_busy' });
       }
-      const me = await users.byId(u.id);
-      if (!me) return ack({ ok: false, error: 'no_such_user' });
-      const side = (id: string | null) => (id === null ? me : botUsers.get(id)!);
-      const g = await games.create({
-        black: side(r.black),
-        white: side(r.white),
-        settings: { size: r.size, komi: r.komi, handicap: r.handicap, ruleset: r.ruleset },
-        clock: r.clock,
-        rated: false,
-        owner: people === 0 ? u.id : undefined,
-      });
+      if (people === 1) starting.add(u.id);
+      let g: LiveGame;
+      try {
+        const me = await users.byId(u.id);
+        if (!me) return ack({ ok: false, error: 'no_such_user' });
+        const side = (id: string | null) => (id === null ? me : botUsers.get(id)!);
+        g = await games.create({
+          black: side(r.black),
+          white: side(r.white),
+          settings: { size: r.size, komi: r.komi, handicap: r.handicap, ruleset: r.ruleset },
+          clock: r.clock,
+          rated: false,
+          owner: people === 0 ? u.id : undefined,
+        });
+      } finally {
+        if (people === 1) starting.delete(u.id);
+      }
       if (people === 1) {
-        for (const [id, s] of lobby.seeks) if (s.creator.id === u.id) lobby.seeks.delete(id);
+        clearWaiting(u.id);
         botSay(g.id, r.black ? g.black : g.white, LINES.greeting);
       }
       ack({ ok: true, gameId: g.id });
@@ -591,7 +1098,10 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
 
     socket.on('disconnect', () => {
       if (!me) limiter.forget(limitKey);
-      if (me && lobby.disconnect(me.id)) broadcastLobby();
+      if (me && lobby.disconnect(me.id)) {
+        challenges.dropUser(me.id);
+        broadcastLobby();
+      }
     });
   });
 
@@ -634,16 +1144,66 @@ export async function buildApp(config: Config, db: Db, opts: AppOptions = {}) {
     }
   }
 
+  /** People whose game is being created right now (between the checks and the game existing). */
+  const starting = new Set<string>();
+
+  /** A player in a game should not have open seeks or challenges. */
+  function clearWaiting(userId: string) {
+    for (const [id, s] of lobby.seeks) if (s.creator.id === userId) lobby.seeks.delete(id);
+    challenges.dropUser(userId);
+  }
+
+  /**
+   * Starts a game between two people on conditions one of them (the offerer) set; the colour is from the offerer's side.
+   * Returns an error code if either is already playing or starting a game.
+   */
+  async function startGame(offererId: string, otherId: string, s: SeekRequest): Promise<LiveGame | string> {
+    if ([offererId, otherId].some((id) => starting.has(id) || userInGame(id))) return 'already_playing';
+    // Hold both players until their game exists, so a second accept cannot start another game for either.
+    const held = [offererId, otherId];
+    held.forEach((id) => starting.add(id));
+    let g: LiveGame;
+    try {
+      const [offerer, other] = await Promise.all([users.byId(offererId), users.byId(otherId)]);
+      if (!offerer || !other) return 'no_such_user';
+      const offererBlack = s.color === 'black' || (s.color === 'random' && Math.random() < 0.5);
+      const settings: GameSettings = { size: s.size, komi: s.komi, handicap: s.handicap, ruleset: s.ruleset };
+      g = await games.create({
+        black: offererBlack ? offerer : other,
+        white: offererBlack ? other : offerer,
+        settings,
+        clock: s.clock,
+        rated: s.rated,
+      });
+    } finally {
+      held.forEach((id) => starting.delete(id));
+    }
+    held.forEach(clearWaiting);
+    io.to(userRoom(g.black.id)).to(userRoom(g.white.id)).emit('game:start', g.id);
+    broadcastLobby();
+    return g;
+  }
+
+  // Expired sessions would otherwise pile up in the table.
+  const sweep = () =>
+    void Promise.all([users.deleteExpiredSessions(), lobbyChat.deleteOld(), social.deleteOld()]).catch((e) => app.log.error(e));
+  sweep();
+  const sweepTimer = setInterval(sweep, SESSION_SWEEP_MS);
+  sweepTimer.unref();
+
   function userInGame(userId: string): LiveGame | undefined {
     for (const g of games.live.values()) if (g.black.id === userId || g.white.id === userId) return g;
     return undefined;
   }
 
   app.addHook('onClose', async () => {
+    clearInterval(sweepTimer);
+    clearInterval(newsTimer);
+    challenges.stop();
     gauge.stop();
     games.stop();
     io.close();
   });
 
-  return { app, io, games, lobby, settings };
+  return { app, io, games, lobby, settings, challenges };
 }

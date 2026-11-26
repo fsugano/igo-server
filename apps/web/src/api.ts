@@ -1,12 +1,15 @@
-import type { AppSettings, ClockSettings, GameSettings, Move, PlayStyle, PlayerRecord, PublicUser, RECORDING_METHODS, RecordingMethod, Role } from '@igo/shared';
+import type { NewsItem, Report, ReportReason, ReportTarget, AppSettings, ClockSettings, GameSettings, Move, PlayStyle, PlayerRecord, PublicUser, RECORDING_METHODS, RecordingMethod, Role } from '@igo/shared';
 
 export class ApiError extends Error {}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  // No connection at all (offline, server down): one clear message instead of the browser's.
   const res = await fetch(path, {
     ...init,
     credentials: 'same-origin',
     headers: init?.body ? { 'content-type': 'application/json' } : undefined,
+  }).catch(() => {
+    throw new ApiError('offline');
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError(body.error ?? `http_${res.status}`);
@@ -40,6 +43,18 @@ export interface GameRecord {
   startedAt: number;
 }
 
+/** The profile editor's view of my own profile. */
+export interface MyProfile {
+  displayName: string | null;
+  declaredRank: string | null;
+  /** When the nickname may be changed again (ms), null if now. */
+  nameChangeAt: number | null;
+  rankResetsRating: boolean;
+  gamesCompleted: number;
+  level: number;
+  nextLevelAt: number;
+}
+
 /** Private to the signed-in user. */
 export interface Account {
   role: Role;
@@ -53,6 +68,41 @@ export interface AdminSettings {
 
 export const api = {
   me: () => request<{ user: PublicUser | null; account: Account | null }>('/api/me'),
+  myProfile: () => request<{ user: PublicUser; profile: MyProfile }>('/api/me/profile'),
+  saveProfile: (patch: { displayName?: string; declaredRank?: string }) =>
+    request<{ user: PublicUser; profile: MyProfile }>('/api/me/profile', { method: 'PATCH', body: JSON.stringify(patch) }),
+  uploadAvatar: async (file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch('/api/me/avatar', { method: 'POST', body: form, credentials: 'same-origin' });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(body.error ?? `http_${res.status}`);
+    return body as { user: PublicUser };
+  },
+  deleteAvatar: () => request<{ user: PublicUser }>('/api/me/avatar', { method: 'DELETE' }),
+  news: (category?: string, before?: string) => {
+    const q = new URLSearchParams();
+    if (category) q.set('category', category);
+    if (before) q.set('before', before);
+    return request<{ items: NewsItem[]; more: boolean }>(`/api/news?${q}`);
+  },
+  newsItem: (id: string) => request<{ item: NewsItem }>(`/api/news/${encodeURIComponent(id)}`),
+  importantNews: () => request<{ items: NewsItem[] }>('/api/news/important'),
+  newsUnread: () => request<{ count: number }>('/api/news/unread-count'),
+  newsRead: () => request<{ ok: true }>('/api/news/read', { method: 'POST' }),
+  adminNews: () => request<{ items: NewsItem[] }>('/api/admin/news'),
+  saveNews: (id: string | null, n: Omit<NewsItem, 'id'>) =>
+    request<{ item: NewsItem }>(id ? `/api/admin/news/${id}` : '/api/admin/news', {
+      method: id ? 'PATCH' : 'POST',
+      body: JSON.stringify(n),
+    }),
+  report: (r: { targetType: ReportTarget; targetId: string; reason: ReportReason; detail?: string }) =>
+    request<{ ok: true }>('/api/reports', { method: 'POST', body: JSON.stringify(r) }),
+  deleteAccount: (password: string) => request<{ ok: true }>('/api/me', { method: 'DELETE', body: JSON.stringify({ password }) }),
+  adminReports: (status: 'open' | 'closed') => request<{ reports: Report[] }>(`/api/admin/reports?status=${status}`),
+  resolveReport: (id: string, action: string) =>
+    request<{ ok: true }>(`/api/admin/reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action }) }),
+  deleteNews: (id: string) => request<{ ok: true }>(`/api/admin/news/${id}`, { method: 'DELETE' }),
   setAllowRecording: (allowRecording: boolean) =>
     request<{ account: Account }>('/api/me/settings', { method: 'PATCH', body: JSON.stringify({ allowRecording }) }),
   adminSettings: () => request<AdminSettings>('/api/admin/settings'),
@@ -71,7 +121,15 @@ export const api = {
     }),
   logout: () => request('/api/auth/logout', { method: 'POST' }),
   profile: (username: string) =>
-    request<{ user: PublicUser; games: ProfileGame[] }>(`/api/users/${encodeURIComponent(username)}`),
+    request<{
+      user: PublicUser;
+      declaredRank: string | null;
+      gamesCompleted: number;
+      games: ProfileGame[];
+      follows: { following: number; followers: number };
+      /** Whether I follow them; null when it is me or I am not logged in. */
+      following: boolean | null;
+    }>(`/api/users/${encodeURIComponent(username)}`),
   game: (id: string) => request<GameRecord>(`/api/games/${encodeURIComponent(id)}`),
   stats: (username: string) =>
     request<{ games: number; limit: number; record: PlayerRecord; style: PlayStyle }>(`/api/users/${encodeURIComponent(username)}/stats`),
@@ -104,6 +162,34 @@ const ERRORS: Record<string, string> = {
   invalid_settings: '設定の値が正しくありません',
   players_cannot_watch_gauge: '対局者は対局中に形勢ゲージを見られません',
   no_such_game: 'その対局は終わったか、見つかりません',
+  invalid_chat: 'メッセージを入力してください',
+  not_in_lobby: 'ロビーを開き直してください',
+  user_offline: 'その人はオフラインになりました',
+  opponent_playing: 'その人は対局中です',
+  opponent_busy: 'その人は今、申し込みを受け付けていません',
+  own_challenge: '自分には申し込めません',
+  invalid_target: 'AIとは「人対AI」から対局できます',
+  challenge_pending: '申し込みは一度に1件までです。返事を待つか取り消してください',
+  challenge_waiting_for_you: 'その人からの申し込みが届いています。先に返事をしてください',
+  challenge_cooldown: '断られた相手には5分間申し込めません',
+  no_such_challenge: 'その申し込みは締め切られました',
+  not_your_challenge: 'この申し込みには返事できません',
+  counter_once: '条件の変更は1回までです',
+  invalid_display_name: 'ニックネームは1〜20文字で、改行や見えない文字は使えません',
+  reserved_display_name: '運営・公式・admin などの言葉や「AI-」で始まる名前は使えません',
+  display_name_cooldown: 'ニックネームの変更は1日1回までです',
+  invalid_image: 'JPEG・PNG・WebP の画像を選んでください',
+  image_too_large: '画像は5MBまでです',
+  invalid_news: 'タイトル（100文字まで）・本文・日時を確認してください。掲載終了は公開より後にしてください',
+  not_found: '見つかりません',
+  user_unavailable: 'この人とはやり取りできません',
+  account_suspended: 'このアカウントは利用停止中です。お問い合わせください',
+  bad_password: 'パスワードが違います',
+  in_game: '対局中は退会できません。対局が終わってからお試しください',
+  no_such_target: '通報する対象が見つかりません（削除されたかもしれません）',
+  no_such_user: 'その人は見つかりません',
+  cannot_ban: 'この人は利用停止にできません',
+  offline: '接続されていません。インターネットへの接続を確かめてください',
 };
 
 export const errorText = (code: string) => ERRORS[code] ?? code;

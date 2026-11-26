@@ -1,3 +1,5 @@
+import { resolve } from 'node:path';
+
 export interface Config {
   port: number;
   host: string;
@@ -13,6 +15,8 @@ export interface Config {
   trustProxy: boolean | number | string;
   /** Browser origins allowed to open the realtime connection. Empty: only the server's own origin. */
   allowedOrigins: string[];
+  /** Where profile pictures are kept (absolute). Production should put a volume or object storage behind it. */
+  uploadDir: string;
 }
 
 export function loadConfig(env = process.env): Config {
@@ -24,7 +28,8 @@ export function loadConfig(env = process.env): Config {
     port: Number(env.PORT ?? 3000),
     host: env.HOST ?? '127.0.0.1',
     databaseUrl: env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/igo',
-    webDist: env.WEB_DIST ?? null,
+    // @fastify/static needs an absolute path.
+    webDist: env.WEB_DIST ? resolve(env.WEB_DIST) : null,
     secureCookies: production,
     sessionDays: Number(env.SESSION_DAYS ?? 30),
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
@@ -32,6 +37,7 @@ export function loadConfig(env = process.env): Config {
       .split(',')
       .map((s) => s.trim().replace(/\/$/, ''))
       .filter(Boolean),
+    uploadDir: resolve(env.UPLOAD_DIR ?? 'data/uploads'),
   };
 }
 

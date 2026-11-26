@@ -5,6 +5,7 @@ import { GameRecord, api, errorText } from '../api';
 import { useAuth } from '../auth';
 import { Board, pointName } from '../components/Board';
 import { BotBadge } from '../components/BotBadge';
+import { Avatar } from '../components/UserBits';
 import { Clock } from '../components/Clock';
 import { Gauge, useGauge } from '../components/Gauge';
 import { NarrationChoice, NarrationSelect, loadNarrationChoice, saveNarrationChoice, useNarration } from '../components/Narration';
@@ -38,6 +39,25 @@ export function clickSound() {
     o.stop(t + 0.1);
   } catch {
     /* audio unavailable */
+  }
+}
+
+const CONFIRM_KEY = 'igo.confirmMoves';
+/** On touch screens a finger easily lands on the wrong point, so confirming is the default there. */
+function loadConfirmMoves(): boolean {
+  try {
+    const v = localStorage.getItem(CONFIRM_KEY);
+    if (v !== null) return v === '1';
+  } catch {
+    // Storage blocked: fall through to the default.
+  }
+  return typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+}
+function saveConfirmMoves(on: boolean) {
+  try {
+    localStorage.setItem(CONFIRM_KEY, on ? '1' : '0');
+  } catch {
+    // Kept for this visit only.
   }
 }
 
@@ -112,6 +132,10 @@ function LiveGame({ initial }: { initial: GameView }) {
   const st = view.state;
   const me: Stone | null = user ? (view.black.id === user.id ? BLACK : view.white.id === user.id ? WHITE : null) : null;
   const myTurn = me !== null && st.phase === 'playing' && st.toMove === me;
+  const [confirmMoves, setConfirmMoves] = useState(loadConfirmMoves);
+  const [pending, setPending] = useState<number | null>(null);
+  // A chosen point is forgotten once the position changes.
+  useEffect(() => setPending(null), [st.moves.length, st.phase]);
   const elapsed = view.turnStartedAt === null ? 0 : now - offset - view.turnStartedAt;
   const last = st.moves[st.moves.length - 1];
   const toMoveUser = st.toMove === BLACK ? view.black : view.white;
@@ -122,7 +146,7 @@ function LiveGame({ initial }: { initial: GameView }) {
   const spectating = me === null;
   useNarration({
     view,
-    names: spectating ? { black: view.black.username, white: view.white.username } : null,
+    names: spectating ? { black: view.black.displayName, white: view.white.displayName } : null,
     gauge: spectating ? gauge : null,
     lang: spectating ? narration : 'off',
   });
@@ -133,8 +157,17 @@ function LiveGame({ initial }: { initial: GameView }) {
     if (!r.ok) setError(errorText(r.error));
   };
 
+  const play = (p: number) => {
+    setPending(null);
+    void act('game:move', p, st.moves.length);
+  };
   const onPlay = (p: number) => {
-    if (myTurn) void act('game:move', p, st.moves.length);
+    if (myTurn && confirmMoves) {
+      // First tap shows the stone, a second tap on it (or the button) plays it.
+      if (st.cells[p] !== 0) return;
+      if (pending === p) play(p);
+      else setPending(p);
+    } else if (myTurn) play(p);
     else if (me && st.phase === 'scoring') void act('game:toggleDead', p);
   };
 
@@ -157,6 +190,7 @@ function LiveGame({ initial }: { initial: GameView }) {
           cells={st.cells}
           lastMove={last?.p}
           ghost={myTurn ? me : null}
+          pending={myTurn ? pending : null}
           onPlay={me && st.phase !== 'finished' ? onPlay : undefined}
           dead={st.dead}
           ownership={st.score?.ownership}
@@ -208,6 +242,28 @@ function LiveGame({ initial }: { initial: GameView }) {
           </div>
         )}
         {error && <p className="error">{error}</p>}
+        {me && st.phase === 'playing' && confirmMoves && myTurn && pending !== null && (
+          <div className="buttons confirm-move">
+            <button className="primary" onClick={() => play(pending)}>
+              ここに打つ（{pointName(pending, st.settings.size)}）
+            </button>
+            <button onClick={() => setPending(null)}>やめる</button>
+          </div>
+        )}
+        {me && st.phase === 'playing' && (
+          <label className="check confirm-toggle">
+            <input
+              type="checkbox"
+              checked={confirmMoves}
+              onChange={(e) => {
+                setConfirmMoves(e.target.checked);
+                saveConfirmMoves(e.target.checked);
+                setPending(null);
+              }}
+            />
+            打つ前に確認する（2回タップで着手）
+          </label>
+        )}
         {me && st.phase === 'playing' && (
           <div className="buttons">
             <button disabled={!myTurn} onClick={() => void act('game:pass', st.moves.length)}>
@@ -260,9 +316,12 @@ function PlayerRow(props: {
   return (
     <div className={`player${toMove ? ' to-move' : ''}`}>
       <span className={`dot ${color === BLACK ? 'black' : 'white'}`} />
+      <Avatar u={user} size={32} />
       <div className="who">
         <span>
-          <Link to={`/u/${user.username}`}>{user.username}</Link>
+          <Link to={`/u/${user.username}`} title={`@${user.username}`}>
+            {user.displayName}
+          </Link>
           <BotBadge user={user} />
         </span>{' '}
         <span className="rank">{user.rank}</span>

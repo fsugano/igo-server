@@ -22,12 +22,14 @@ interface Props {
   /** Colour of the ghost stone shown under the cursor; null disables clicks. */
   ghost?: number | null;
   onPlay?: (p: number) => void;
+  /** A move chosen but not yet played (confirm-before-play), drawn in the ghost colour. */
+  pending?: number | null;
   dead?: number[];
   /** Territory ownership to draw (scoring). */
   ownership?: number[] | null;
 }
 
-export function Board({ size, cells, lastMove, ghost, onPlay, dead = [], ownership }: Props) {
+export function Board({ size, cells, lastMove, ghost, onPlay, pending, dead = [], ownership }: Props) {
   const [hover, setHover] = useState<number | null>(null);
   const deadSet = useMemo(() => new Set(dead), [dead]);
   const stars = useMemo(() => starPoints(size), [size]);
@@ -74,8 +76,15 @@ export function Board({ size, cells, lastMove, ghost, onPlay, dead = [], ownersh
     const y = Math.floor(lastMove / size);
     marks.push(<circle key="last" cx={x} cy={y} r={0.2} className={`last ${cells[lastMove] === BLACK ? 'on-black' : 'on-white'}`} />);
   }
+  const pendingStone =
+    ghost && pending != null && cells[pending] === 0 ? (
+      <g className="pending">
+        <circle cx={pending % size} cy={Math.floor(pending / size)} r={0.47} className={`stone pending ${ghost === BLACK ? 'black' : 'white'}`} />
+        <circle cx={pending % size} cy={Math.floor(pending / size)} r={0.6} className="pending-ring" />
+      </g>
+    ) : null;
   const ghostStone =
-    ghost && hover !== null && cells[hover] === 0 ? (
+    ghost && pending == null && hover !== null && cells[hover] === 0 ? (
       <circle cx={hover % size} cy={Math.floor(hover / size)} r={0.47} className={`stone ghost ${ghost === BLACK ? 'black' : 'white'}`} />
     ) : null;
 
@@ -126,6 +135,7 @@ export function Board({ size, cells, lastMove, ghost, onPlay, dead = [], ownersh
       <g className="coords">{labels}</g>
       <g>{stones}</g>
       {ghostStone}
+      {pendingStone}
       <g>{marks}</g>
     </svg>
   );

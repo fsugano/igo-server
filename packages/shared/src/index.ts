@@ -8,3 +8,4 @@ export * from './rating.js';
 export * from './scoring.js';
 export * from './sgf.js';
 export * from './stats.js';
+export * from './profile.js';

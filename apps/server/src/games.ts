@@ -6,6 +6,9 @@ import {
   GameSettings,
   GameSummary,
   GameView,
+  LEVEL_DAILY_AI_GAMES,
+  LEVEL_DAILY_SAME_OPPONENT,
+  LEVEL_MIN_MOVES,
   Move,
   PASS,
   PlayerClock,
@@ -21,8 +24,9 @@ import {
   updateRatings,
 } from '@igo/shared';
 import type { Engine, EngineMove } from './ai/index.js';
+import type { PoolClient } from 'pg';
 import type { Db } from './db.js';
-import { UserRow, toPublicUser } from './users.js';
+import { USER_COLUMNS, UserRow, toPublicUser, userJson } from './users.js';
 
 export interface LiveGame {
   id: string;
@@ -104,7 +108,7 @@ export class GameService {
   /** Restores active games after a restart. The player to move gets a fresh turn start. */
   async loadActive(): Promise<number> {
     const r = await this.db.query(
-      `SELECT g.*, row_to_json(b) AS b, row_to_json(w) AS w FROM games g
+      `SELECT g.*, ${userJson('b')} AS b, ${userJson('w')} AS w FROM games g
        JOIN users b ON b.id = g.black_id JOIN users w ON w.id = g.white_id
        WHERE g.status = 'active'`,
     );
@@ -398,7 +402,7 @@ export class GameService {
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
-      const users = await client.query<UserRow>('SELECT * FROM users WHERE id = ANY($1) FOR UPDATE', [[g.black.id, g.white.id]]);
+      const users = await client.query<UserRow>(`SELECT ${USER_COLUMNS} FROM users WHERE id = ANY($1) FOR UPDATE`, [[g.black.id, g.white.id]]);
       const b = users.rows.find((u) => String(u.id) === g.black.id)!;
       const w = users.rows.find((u) => String(u.id) === g.white.id)!;
       // Games with fewer than two moves each are not rated (aborted / disconnected starts).
@@ -416,6 +420,11 @@ export class GameService {
         await client.query('UPDATE users SET rating = $2, games_played = games_played + 1 WHERE id = $1', [b.id, nr.black]);
         await client.query('UPDATE users SET rating = $2, games_played = games_played + 1 WHERE id = $1', [w.id, nr.white]);
       }
+      for (const [me, other] of [[b, w], [w, b]]) {
+        if (await this.countsForLevel(client, g, me, other)) {
+          await client.query('UPDATE users SET games_completed = games_completed + 1 WHERE id = $1', [me.id]);
+        }
+      }
       const sgf = this.sgf(g, b.rating, w.rating);
       await client.query(
         `UPDATE games SET status = 'finished', moves = $2, clocks = $3, result = $4, rating_change = $5, sgf = $6, ended_at = now()
@@ -429,6 +438,29 @@ export class GameService {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Whether a finished game raises a person's level count: played to the end with enough moves, and within the daily
+   * limits against the computer and against the same person (so short repeated games do not pile up levels).
+   */
+  private async countsForLevel(client: PoolClient, g: LiveGame, me: UserRow, other: UserRow): Promise<boolean> {
+    if (me.bot || g.game.moves.length < LEVEL_MIN_MOVES) return false;
+    const today = `g.status = 'finished' AND g.ended_at > now() - interval '1 day' AND jsonb_array_length(g.moves) >= ${LEVEL_MIN_MOVES} AND g.id <> $2`;
+    if (other.bot) {
+      const r = await client.query<{ n: string }>(
+        `SELECT count(*) AS n FROM games g JOIN users o ON o.id = CASE WHEN g.black_id = $1 THEN g.white_id ELSE g.black_id END
+         WHERE (g.black_id = $1 OR g.white_id = $1) AND o.bot IS NOT NULL AND ${today}`,
+        [me.id, g.id],
+      );
+      return Number(r.rows[0].n) < LEVEL_DAILY_AI_GAMES;
+    }
+    const r = await client.query<{ n: string }>(
+      `SELECT count(*) AS n FROM games g
+       WHERE ((g.black_id = $1 AND g.white_id = $3) OR (g.black_id = $3 AND g.white_id = $1)) AND ${today}`,
+      [me.id, g.id, other.id],
+    );
+    return Number(r.rows[0].n) < LEVEL_DAILY_SAME_OPPONENT;
   }
 
   sgf(g: LiveGame, blackRating = g.black.rating, whiteRating = g.white.rating): string {

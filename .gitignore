@@ -5,3 +5,4 @@ dist
 coverage
 test-results
 ai-engines.json
+data/

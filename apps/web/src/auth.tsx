@@ -1,7 +1,7 @@
 import type { PublicUser } from '@igo/shared';
 import { createContext, ReactNode, useCallback, useContext, useEffect, useState } from 'react';
 import { Account, api } from './api';
-import { resetSocket } from './socket';
+import { getSocket, resetSocket } from './socket';
 
 interface AuthState {
   user: PublicUser | null;
@@ -9,6 +9,8 @@ interface AuthState {
   setAccount(a: Account): void;
   loading: boolean;
   setUser(u: PublicUser | null): void;
+  /** New details for the same signed-in user (no reconnect). */
+  updateUser(u: PublicUser): void;
   refresh(): Promise<void>;
   logout(): Promise<void>;
 }
@@ -31,6 +33,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void refresh();
   }, [refresh]);
 
+  // Rating and level after a game, nickname or picture changed in another tab.
+  useEffect(() => {
+    const s = getSocket();
+    const onUpdated = (u: PublicUser) => setUserState((cur) => (cur && cur.id === u.id ? u : cur));
+    s.on('user:updated', onUpdated);
+    return () => {
+      s.off('user:updated', onUpdated);
+    };
+  }, []);
+
   const setUser = (u: PublicUser | null) => {
     setUserState(u);
     resetSocket();
@@ -44,7 +56,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   };
 
-  return <Ctx.Provider value={{ user, account, setAccount, loading, setUser, refresh, logout }}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={{ user, account, setAccount, loading, setUser, updateUser: setUserState, refresh, logout }}>{children}</Ctx.Provider>;
 }
 
 export function useAuth(): AuthState {
